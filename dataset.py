@@ -14,27 +14,27 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 class Twibot20(Dataset):
-    def __init__(self,root='./procrssed_data',device='cpu',process=True,save=True): # process:控制是否加载原始数据并进行数据预处理
+    def __init__(self,root='./processed_data',device='cpu',process=True,save=True): # process:控制是否加载原始数据并进行数据预处理
         self.root = root
         self.device = device
         self.process = process
         if process:
             # 读取原始数据
             print('加载 train.json')
-            df_train = pd.read_json('./data/train.json')
+            df_train = pd.read_json('./Data/train.json')
             print('加载 test.json')
-            df_test = pd.read_json('./data/test.json')
+            df_test = pd.read_json('./Data/test.json')
             print('加载 support.json')
-            df_support = pd.read_json('./data/support.json')
+            df_support = pd.read_json('./Data/support.json')
             print('加载 dev.json')
-            df_dev = pd.read_json('./data/dev.json')
+            df_dev = pd.read_json('./Data/dev.json')
             print('Finished')
 
             # 对原始数据集进行列筛选 - 只保留需要的列 , iloc是 pandas 中按位置索引选择数据的方法
             df_train = df_train.iloc[:,[0,1,2,3,5]] # 除domain之外的其余模块信息
             df_test = df_test.iloc[:,[0,1,2,3,5]]
             df_dev = df_dev.iloc[:,[0,1,2,3,5]]
-            df_support = df_support[:,[0,1,2,3]]
+            df_support = df_support.iloc[:,[0,1,2,3]]
             df_support['label'] = 'None' # 支持集没有标签信息
 
             # 拼接数据集,拼接后重新生成连续的索引
@@ -62,7 +62,7 @@ class Twibot20(Dataset):
         path = self.root + 'description.npy'
         if not os.path.exists(path):
             description = []
-            for i in range (self.df_data.shape(0)):
+            for i in range(self.df_data.shape[0]):
                 if self.df_data['profile'][i] is None or self.df_data['profile'][i]['description'] is None:
                     description.append('None')
                 else:
@@ -103,9 +103,7 @@ class Twibot20(Dataset):
         return des_tensor
 
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
-    def tweets_preprogress(self):
-
-
+    # def tweets_preprogress(self):
 
     # 获取推文特征表示（嵌入）
     # def tweets_embedding(self):
@@ -121,8 +119,21 @@ class Twibot20(Dataset):
     # def Build_Graph(self):
     #
     #
-    #
-    # def train_val_test_mask(self):
-    #
-    #
-    # def dataloader(self):
+
+    # 明确训练集、验证集、测试集在拼接后的标签数据中的索引范围
+    def train_val_test_mask(self):
+        train_idx = range(8278)
+        val_idx = range(8278,8278 + 2365)
+        test_idx = range(8278+2365,8278+2365+1183)
+        return train_idx,val_idx,test_idx
+
+    # 先只关注description数据进行加载分析
+    def dataloader(self):
+        labels = self.load_labels()
+        if self.process:
+            self.Des_preprocess()
+            # self.tweets_preprocess()
+        des_tensor = self.Des_embedding()
+
+        train_idx,val_idx,test_idx = self.train_val_test_mask()
+        return des_tensor,train_idx,val_idx,test_idx
