@@ -43,7 +43,7 @@ class Twibot20(Dataset):
             self.df_data = self.df_data_labeled  # 为了兼容性，设置 df_data 等于 df_data_labeled
             self.save = save
 
-    # 生成/加载label.pt（）
+    # 生成/加载label.pt（） - 所有user的标签信息
     def load_labels(self):
         print('加载 labels...',end=' ')
         path = self.root + 'label.pt'
@@ -82,7 +82,7 @@ class Twibot20(Dataset):
         path = self.root + "des_tensor.pt"
         if not os.path.exists(path):
             description = np.load(os.path.join(self.root, 'description.npy'), allow_pickle=True)
-            # 使用预训练语言模型获得嵌入表示
+            # 使用预训练语言模型获得嵌入表示 - distilroberta-base的隐藏层维度（即每个 token 的嵌入维度）为768 维
             print('加载 RoBerta')
             feature_extraction = pipeline('feature-extraction',model = "distilroberta-base",tokenizer="distilroberta-base",device=0) # 使用 Hugging Face 的 pipeline 创建 feature-extraction 任务处理器
             des_vec = []
