@@ -1,7 +1,3 @@
-"""
-训练 DesExpert 模型
-使用 BERT + MLP 处理 description 信息，输出 64维 Expert Representation 和 Bot Probability
-"""
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
