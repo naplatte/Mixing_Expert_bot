@@ -1,59 +1,97 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import BertModel, BertConfig
+from transformers import BertModel, BertTokenizer
 
 class DesExpert(nn.Module):
-    def __init__(self, input_dim=768, expert_dim=64, dropout_rate=0.3):
+    """
+    Description Expert Model
+    使用 BERT + MLP 处理 description 信息
+    
+    输入: description 原始文本
+    输出: 
+        - 64维 Expert Representation Vector
+        - Bot Probability (P(bot|Description Expert))
+    """
+    def __init__(self, 
+                 bert_model_name='bert-base-uncased',
+                 hidden_dim=768,
+                 expert_dim=64,
+                 dropout=0.1):
+        """
+        Args:
+            bert_model_name: BERT 模型名称，默认 'bert-base-uncased'
+            hidden_dim: BERT 输出维度，默认 768
+            expert_dim: Expert Representation 维度，默认 64
+            dropout: Dropout 概率，默认 0.1
+        """
         super(DesExpert, self).__init__()
         
-        # 加载预训练的BERT模型
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        # BERT Encoder (fine-tuned)
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.hidden_dim = hidden_dim
         
-        # 冻结BERT的参数，只微调MLP层
-        for param in self.bert.parameters():
-            param.requires_grad = False
-        
-        # 多层感知机(MLP)用于特征转换
+        # MLP 网络
+        # 从 BERT 的 768维 [CLS] token 到 64维 Expert Representation
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 512),
+            nn.Linear(hidden_dim, 256),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(dropout),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(dropout_rate)
+            nn.Dropout(dropout),
+            nn.Linear(128, expert_dim)
         )
         
-        # 专家表示向量输出层
-        self.expert_output = nn.Linear(128, expert_dim)
+        # Bot Probability 预测头
+        # 从 64维 Expert Representation 到 1维 bot 概率
+        self.bot_classifier = nn.Sequential(
+            nn.Linear(expert_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid()  # 输出 bot 概率
+        )
         
-        # Bot概率分数输出层（二分类）
-        self.bot_output = nn.Linear(128, 1)
+    def forward(self, input_ids, attention_mask=None):
+        """
+        Forward pass
         
-        self.dropout = nn.Dropout(dropout_rate)
+        Args:
+            input_ids: Tokenized input text, shape: [batch_size, seq_len]
+            attention_mask: Attention mask, shape: [batch_size, seq_len]
+        
+        Returns:
+            expert_repr: 64维 Expert Representation Vector, shape: [batch_size, 64]
+            bot_prob: Bot Probability, shape: [batch_size, 1]
+        """
+        # BERT Encoder
+        # outputs.last_hidden_state: [batch_size, seq_len, 768]
+        # outputs.pooler_output: [batch_size, 768] (CLS token)
+        bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = bert_outputs.pooler_output  # [batch_size, 768]
+        
+        # MLP: 768维 → 64维 Expert Representation
+        expert_repr = self.mlp(cls_embedding)  # [batch_size, 64]
+        
+        # Bot Probability 预测
+        bot_prob = self.bot_classifier(expert_repr)  # [batch_size, 1]
+        
+        return expert_repr, bot_prob
     
-    def forward(self, x):
-        # x是768维的描述向量
+    def get_expert_repr(self, input_ids, attention_mask=None):
+        """
+        只获取 Expert Representation，不计算 bot 概率
+        用于 gating network 使用
         
-        # 由于我们已经有了描述的嵌入向量，这里可以直接传入MLP
-        # 如果需要使用BERT进一步处理，可以取消下面注释
-        # with torch.no_grad():
-        #     bert_output = self.bert(inputs_embeds=x.unsqueeze(1))
-        #     x = bert_output.last_hidden_state.squeeze(1)
+        Args:
+            input_ids: Tokenized input text, shape: [batch_size, seq_len]
+            attention_mask: Attention mask, shape: [batch_size, seq_len]
         
-        # 通过MLP进行特征转换
-        mlp_output = self.mlp(x)
-        mlp_output = self.dropout(mlp_output)
-        
-        # 生成64维专家表示向量
-        expert_vector = self.expert_output(mlp_output)
-        expert_vector = F.normalize(expert_vector, p=2, dim=1)  # L2归一化
-        
-        # 生成bot概率分数
-        bot_logits = self.bot_output(mlp_output)
-        bot_prob = torch.sigmoid(bot_logits)  # 使用sigmoid激活函数转换为概率
-        
-        return expert_vector, bot_prob
+        Returns:
+            expert_repr: 64维 Expert Representation Vector, shape: [batch_size, 64]
+        """
+        bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = bert_outputs.pooler_output
+        expert_repr = self.mlp(cls_embedding)
+        return expert_repr
