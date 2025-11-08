@@ -27,7 +27,7 @@ class DescriptionDataset(Dataset):
     def __len__(self):
         return len(self.descriptions)
 
-    # 获取单个样本(原始文本)
+    # 获取单个样本(原始文本),当对对象使用索引操作时会自动调用
     def __getitem__(self, idx):
         description = str(self.descriptions[idx]) # 将文本信息转为字符串
         label = self.labels[idx]
@@ -87,13 +87,13 @@ def train_des_expert(
         descriptions = descriptions.tolist() # 如果 descriptions 是 numpy 数组，则将其转换为列表
     labels = labels.cpu().numpy() # label转为numpy数组 (numpy只能直接处理CPU上的数据，无法直接访问GPU上的数据，所以需要先将lable转移到CPU)
     
-    # 获取训练/验证/测试集索引
+    # 获取训练/验证/测试集索引,并转换为列表形式,每个列表包含一系列整数值，表示样本在原始数据集中的索引位置
     train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
     train_idx = list(train_idx)
     val_idx = list(val_idx)
     test_idx = list(test_idx)
     
-    # 划分数据集
+    # 提取des以及对应label
     train_descriptions = [descriptions[i] for i in train_idx]
     train_labels = labels[train_idx]
     
@@ -117,7 +117,7 @@ def train_des_expert(
     val_dataset = DescriptionDataset(val_descriptions, val_labels, tokenizer)
     test_dataset = DescriptionDataset(test_descriptions, test_labels, tokenizer)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) # shuffle:是否打乱顺序
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
@@ -132,16 +132,16 @@ def train_des_expert(
     
     # 训练循环
     print("\n5. 开始训练...")
-    best_val_loss = float('inf')
+    best_val_loss = float('inf') # 最下损失，初始为float_max
     
     for epoch in range(num_epochs):
         # 训练阶段
         model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
+        train_loss = 0.0 # 累计当前轮所有batch的损失值(float)
+        train_correct = 0 # 累计当前轮模型正确预测的样本数量(int)
+        train_total = 0 # 累计当前轮处理样本的总数量(int)
         
-        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
+        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]') # 进度条对象
         for batch in train_pbar:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
