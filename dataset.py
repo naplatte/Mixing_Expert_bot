@@ -76,36 +76,36 @@ class Twibot20(Dataset):
         print('finished')
         return description
 
-    # 获取简介特征表示（嵌入）
-    def Des_embedding(self):
-        print('开始简介description特征嵌入')
-        path = self.root + "des_tensor.pt"
-        if not os.path.exists(path):
-            description = np.load(os.path.join(self.root, 'description.npy'), allow_pickle=True)
-            # 使用预训练语言模型获得嵌入表示 - distilroberta-base的隐藏层维度（即每个 token 的嵌入维度）为768 维
-            print('加载 RoBerta')
-            feature_extraction = pipeline('feature-extraction',model = "distilroberta-base",tokenizer="distilroberta-base",device=0) # 使用 Hugging Face 的 pipeline 创建 feature-extraction 任务处理器
-            des_vec = []
-            for each in tqdm(description):
-                feature = torch.Tensor(feature_extraction(each))
-                # 先累加一个句子中的所有词向量
-                feature_tensor = None
-                for (i, tensor) in enumerate(feature[0]):
-                    if i == 0:
-                        feature_tensor = tensor
-                    else:
-                        feature_tensor += tensor
-
-                # 对句子中所有词向量取平均（只计算一次）
-                feature_tensor /= feature.shape[1]
-                des_vec.append(feature_tensor)  # 每个句子只append一次
-            des_tensor = torch.stack(des_vec,0).to(self.device)
-            if self.save:
-                torch.save(des_tensor,'./Data/des_tensor.pt')
-        else:
-            des_tensor = torch.load(self.root + "des_tensor.pt").to(self.device)
-        print("finished")
-        return des_tensor
+    # 获取简介特征表示（嵌入）:因为其使用的是未经过微调的roberta，混合专家系统中需要使用微调的bert生成句向量
+    # def Des_embedding(self):
+    #     print('开始简介description特征嵌入')
+    #     path = self.root + "des_tensor.pt"
+    #     if not os.path.exists(path):
+    #         description = np.load(os.path.join(self.root, 'description.npy'), allow_pickle=True)
+    #         # 使用预训练语言模型获得嵌入表示 - distilroberta-base的隐藏层维度（即每个 token 的嵌入维度）为768 维
+    #         print('加载 RoBerta')
+    #         feature_extraction = pipeline('feature-extraction',model = "distilroberta-base",tokenizer="distilroberta-base",device=0) # 使用 Hugging Face 的 pipeline 创建 feature-extraction 任务处理器
+    #         des_vec = []
+    #         for each in tqdm(description):
+    #             feature = torch.Tensor(feature_extraction(each))
+    #             # 先累加一个句子中的所有词向量
+    #             feature_tensor = None
+    #             for (i, tensor) in enumerate(feature[0]):
+    #                 if i == 0:
+    #                     feature_tensor = tensor
+    #                 else:
+    #                     feature_tensor += tensor
+    #
+    #             # 对句子中所有词向量取平均（只计算一次）
+    #             feature_tensor /= feature.shape[1]
+    #             des_vec.append(feature_tensor)  # 每个句子只append一次
+    #         des_tensor = torch.stack(des_vec,0).to(self.device)
+    #         if self.save:
+    #             torch.save(des_tensor,'./Data/des_tensor.pt')
+    #     else:
+    #         des_tensor = torch.load(self.root + "des_tensor.pt").to(self.device)
+    #     print("finished")
+    #     return des_tensor
 
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
     # def tweets_preprogress(self):
@@ -133,12 +133,12 @@ class Twibot20(Dataset):
         return train_idx,val_idx,test_idx
 
     # 先只关注description数据进行加载分析
-    def dataloader(self):
-        labels = self.load_labels()
-        if self.process:
-            self.Des_preprocess()
-            # self.tweets_preprocess()
-        des_tensor = self.Des_embedding()
-
-        train_idx,val_idx,test_idx = self.train_val_test_mask()
-        return des_tensor,train_idx,val_idx,test_idx
+    # def dataloader(self):
+    #     labels = self.load_labels()
+    #     if self.process:
+    #         self.Des_preprocess()
+    #         # self.tweets_preprocess()
+    #     des_tensor = self.Des_embedding()
+    #
+    #     train_idx,val_idx,test_idx = self.train_val_test_mask()
+    #     return des_tensor,train_idx,val_idx,test_idx
