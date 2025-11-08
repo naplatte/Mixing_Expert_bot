@@ -54,16 +54,8 @@ class DesExpert(nn.Module):
         
         return expert_repr, bot_prob
 
-    # 只获取 Expert Representation，不计算 bot 概率，用于 gating network 使用
+    # 只获取专家表示，用于 gating network 使用
     def get_expert_repr(self, input_ids, attention_mask=None):
-        """
-        Args:
-            input_ids: Tokenized input text, shape: [batch_size, seq_len]
-            attention_mask: Attention mask, shape: [batch_size, seq_len]
-        
-        Returns:
-            expert_repr: 64维 Expert Representation Vector, shape: [batch_size, 64]
-        """
         bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = bert_outputs.pooler_output
         expert_repr = self.mlp(cls_embedding)

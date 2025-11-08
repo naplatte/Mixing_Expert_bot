@@ -56,8 +56,8 @@ class Twibot20(Dataset):
         print("finished")
         return labels
 
-    # 用户简介处理 —— 这里可以看出，用户简介为空时，对应的填充值为None（联系专家系统应对特征不全的场景） - 如果是服务于专家系统，就不应去填这个默认值None
-    # 为简介特征嵌入提供一种统一的输入（数组）
+    # 用户简介处理 —— 这里可以看出，用户简介为空时，对应的填充值为None（联系专家系统应对特征不全的场景）
+    # 为简介特征嵌入提供一种统一的输入vector<string>
     def Des_preprocess(self):
         print('加载简介description特征...',end = ' ')
         path = os.path.join(self.root, 'description.npy')

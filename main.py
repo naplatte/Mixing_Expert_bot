@@ -10,10 +10,6 @@ from dataset import Twibot20
 from model import DesExpert
 
 class DescriptionDataset(Dataset):
-    """
-    用于训练 DesExpert 的数据集
-    从 Twibot20 数据集中提取 description 文本和标签
-    """
     def __init__(self, descriptions, labels, tokenizer, max_length=128):
         """
         Args:
@@ -26,21 +22,23 @@ class DescriptionDataset(Dataset):
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_length = max_length
-    
+
+    # 返回数据集中样本的总数
     def __len__(self):
         return len(self.descriptions)
-    
+
+    # 获取单个样本(原始文本)
     def __getitem__(self, idx):
-        description = str(self.descriptions[idx])
+        description = str(self.descriptions[idx]) # 将文本信息转为字符串
         label = self.labels[idx]
         
-        # Tokenize
+        # Tokenize(BERT分词器)
         encoded = self.tokenizer(
             description,
             max_length=self.max_length,
             padding='max_length',
-            truncation=True,
-            return_tensors='pt'
+            truncation=True, # 超过最大长度的序列将被截断
+            return_tensors='pt' # pytorch tensor
         )
         
         return {
@@ -55,7 +53,7 @@ def train_des_expert(
     learning_rate=2e-5,
     num_epochs=10,
     device='cuda' if torch.cuda.is_available() else 'cpu',
-    save_dir='./checkpoints',
+    save_dir='./ExpertModel',
     bert_model_name='bert-base-uncased'
 ):
     """
@@ -82,13 +80,12 @@ def train_des_expert(
     twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
     
     # 获取 description 文本和标签
-    descriptions = twibot_dataset.Des_preprocess()  # 获取原始文本
+    descriptions = twibot_dataset.Des_preprocess()  # 获取原始文本并预处理
     labels = twibot_dataset.load_labels()  # 获取标签
-    
-    # 转换为 numpy 数组
+
     if isinstance(descriptions, np.ndarray):
-        descriptions = descriptions.tolist()
-    labels = labels.cpu().numpy()
+        descriptions = descriptions.tolist() # 如果 descriptions 是 numpy 数组，则将其转换为列表
+    labels = labels.cpu().numpy() # label转为numpy数组 (numpy只能直接处理CPU上的数据，无法直接访问GPU上的数据，所以需要先将lable转移到CPU)
     
     # 获取训练/验证/测试集索引
     train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
