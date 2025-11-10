@@ -53,13 +53,13 @@ class Twibot20(Dataset):
                 torch.save(labels,'./processed_data/label.pt')
         else:
             labels = torch.load(self.root + "label.pt").to(self.device)
-        print("finished")
+        print("load_labels finished")
         return labels
 
     # 用户简介处理 —— 这里可以看出，用户简介为空时，对应的填充值为None（联系专家系统应对特征不全的场景）
     # 为简介特征嵌入提供一种统一的输入vector<string>
     def Des_preprocess(self):
-        print('加载简介description特征...',end = ' ')
+        print('加载简介description信息...',end = ' ')
         path = os.path.join(self.root, 'description.npy')
         if not os.path.exists(path):
             description = []
@@ -73,7 +73,7 @@ class Twibot20(Dataset):
                 np.save(path, description)
         else:
             description = np.load(path, allow_pickle=True) # allow_pickle=True 允许加载包含字符串等 Python 对象的数组
-        print('finished')
+        print('Des_preprocess finished')
         return description
 
     # 获取简介特征表示（嵌入）:因为其使用的是未经过微调的roberta，混合专家系统中需要使用微调的bert生成句向量
@@ -108,7 +108,26 @@ class Twibot20(Dataset):
     #     return des_tensor
 
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
-    # def tweets_preprogress(self):
+    def tweets_preprogress(self):
+        print('加载推文信息...',end = ' ')
+        path = self.root + 'tweets.npy'
+        if not os.path.exists(path):
+            tweets = []
+            for i in range(self.df_data_labeled.shape[0]):
+                one_user_tweets = []
+                if self.df_data_labeled['tweet'][i] is None:
+                    one_user_tweets.append('')
+                else:
+                    for each in self.df_data_labeled['tweet'][i]:
+                        one_user_tweets.append(each)
+                tweets.append(one_user_tweets)
+            tweets = np.array(tweets)
+            if self.save:
+                np.save(path,tweets)
+        else:
+            tweets = np.load(path,allow_pickle=True)
+        print('tweets_preprogress finished')
+        return tweets
 
     # 获取推文特征表示（嵌入）
     # def tweets_embedding(self):

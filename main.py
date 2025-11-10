@@ -266,7 +266,7 @@ if __name__ == '__main__':
     config = {
         'dataset_path': './processed_data',
         'batch_size': 32,
-        'learning_rate': 2e-5,
+        'learning_rate': 1e-3,
         'num_epochs': 10,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'save_dir': './checkpoints',
