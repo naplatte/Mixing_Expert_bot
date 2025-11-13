@@ -54,7 +54,7 @@ def train_des_expert(
     learning_rate=2e-5,
     num_epochs=10,
     device='cuda' if torch.cuda.is_available() else 'cpu',
-    save_dir='./ExpertModel',
+    save_dir='../autodl-tmp/checkpoints',
     bert_model_name='bert-base-uncased'
 ):
     """
@@ -288,7 +288,7 @@ if __name__ == '__main__':
         'learning_rate': 2e-5,
         'num_epochs': 10,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'save_dir': './checkpoints',
+        'save_dir': '../autodl-tmp/checkpoints',
         'bert_model_name': 'bert-base-uncased'
     }
     

@@ -202,21 +202,21 @@ class GatingNetwork(nn.Module):
         self.fc1 = nn.Linear(num_experts * expert_dim, hidden_dim) # 专家数量 * 专家表示维度，即num*64的矩阵->128d的向量
         self.fc2 = nn.Linear(hidden_dim, num_experts) # 128d->专家数量d的向量 比如5个专家就是[x,x,x,x,x]，每个x就是该专家的打分值（之后经过Softmax转为权重）
 
-    def forward(self, expert_reprs, active_mask=None):
+    def forward(self, expert_reprs, active_mask=None): # 输入：
         """
-        expert_reprs: Tensor [batch_size, num_experts, expert_dim]
-        active_mask:  Tensor [batch_size, num_experts], 1 表示该专家激活，0 表示缺失
+        expert_reprs: Tensor [batch_size, num_experts, expert_dim] - 每个用户的表示为[num_experts, expert_dim]即num_experts*expert_dim的矩阵
+        active_mask:  Tensor [batch_size, num_experts], 1 表示该专家激活，0 表示缺失 表示对于该用户，专家激活/缺失的情况
         """
         # 拼接所有专家的表示向量
-        x = expert_reprs.reshape(expert_reprs.size(0), -1)   # [batch_size, num_experts*expert_dim]
+        x = expert_reprs.reshape(expert_reprs.size(0), -1)   # 将专家表示矩阵展平成一个长向量，方便送入MLP
 
         # 两层 MLP
-        h = torch.tanh(self.fc1(x))                          # 非线性特征提取
-        logits = self.fc2(h)                                 # 输出每个专家的打分值 [batch_size, num_experts]
+        h = torch.tanh(self.fc1(x)) # 非线性特征提取
+        logits = self.fc2(h) # 输出每个专家的打分值 [batch_size, num_experts]
 
-        # 对缺失专家屏蔽（防止影响 softmax）
+        # 对缺失专家屏蔽（防止影响softmax）
         if active_mask is not None:
-            logits = logits.masked_fill(active_mask == 0, -1e9)
+            logits = logits.masked_fill(active_mask == 0, -1e9) # 将mask为0（专家未激活）的logits对应位置设为-1e9(fc1和fc2对所有输入向量都做计算，不管某个专家是否“激活”，它都会在logits输出一个对应位置的值)
 
         # Softmax 得到权重（权重之和为 1）
         weights = F.softmax(logits, dim=1)
@@ -232,7 +232,7 @@ class ExpertGatedAggregator(nn.Module):
 
     def forward(self, expert_reprs_list, expert_bot_probs_list, active_mask=None):
         """
-        expert_reprs_list: 长度为 num_experts 的列表，每个元素是 [batch_size, expert_dim]
+        expert_reprs_list: 长度为专家数量的列表，每个元素是[batch_size, expert_dim]，表示每个专家在每个batch中的表示向量
         expert_bot_probs_list: 长度为 num_experts 的列表，每个元素是 [batch_size, 1]
         active_mask: [batch_size, num_experts]，指示哪些专家有效
         """
