@@ -21,13 +21,13 @@ class Twibot20(Dataset):
         if process:
             # 读取原始数据
             print('加载 train.json')
-            df_train = pd.read_json('./Data/train.json')
+            df_train = pd.read_json('../autodl-tmp/Data/train.json') # ('./Data/train.json')
             print('加载 test.json')
-            df_test = pd.read_json('./Data/test.json')
+            df_test = pd.read_json('../autodl-tmp/Data/test.json')
             # print('加载 support.json')
             # df_support = safe_read_json('./Data/support.json')
             print('加载 dev.json')
-            df_dev = pd.read_json('./Data/dev.json')
+            df_dev = pd.read_json('../autodl-tmp/Data/dev.json')
             print('Finished')
 
             # 对原始数据集进行列筛选 - 只保留需要的列 , iloc是 pandas 中按位置索引选择数据的方法
@@ -110,7 +110,7 @@ class Twibot20(Dataset):
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
     def tweets_preprogress(self):
         print('加载推文信息...',end = ' ')
-        path = self.root + 'tweets.npy'
+        path = os.path.join(self.root, 'tweets.npy')
         if not os.path.exists(path):
             tweets = []
             for i in range(self.df_data_labeled.shape[0]):
@@ -121,11 +121,17 @@ class Twibot20(Dataset):
                     for each in self.df_data_labeled['tweet'][i]:
                         one_user_tweets.append(each)
                 tweets.append(one_user_tweets)
-            tweets = np.array(tweets)
             if self.save:
-                np.save(path,tweets)
+                # 保存变长列表为 object 数组，启用 allow_pickle
+                tweets_obj = np.array(tweets, dtype=object)
+                np.save(path, tweets_obj, allow_pickle=True)
         else:
-            tweets = np.load(path,allow_pickle=True)
+            tweets = np.load(path, allow_pickle=True)
+            # 将 object ndarray 转换为 Python 列表，便于后续处理
+            try:
+                tweets = tweets.tolist()
+            except Exception:
+                pass
         print('tweets_preprogress finished')
         return tweets
 
