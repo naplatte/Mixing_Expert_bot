@@ -11,7 +11,6 @@ import numpy as np
 import os
 from dataset import Twibot20
 from model import TweetsExpert
-from metrics import update_binary_counts, compute_binary_f1
 
 class TweetsDataset(Dataset):
     def __init__(self, tweets_list, labels):
@@ -62,7 +61,7 @@ def train_tweets_expert(
     learning_rate=1e-3,  # 只训练MLP，可以使用更大的学习率
     num_epochs=10,
     device='cuda' if torch.cuda.is_available() else 'cpu',
-    save_dir='../autodl-tmp/checkpoints'
+    save_dir='./checkpoints'
 ):
     """
     训练 TweetsExpert 模型
@@ -152,7 +151,6 @@ def train_tweets_expert(
         train_loss = 0.0
         train_correct = 0
         train_total = 0
-        train_counts = {'tp': 0, 'fp': 0, 'fn': 0}
         
         train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
         for batch in train_pbar:
@@ -175,26 +173,20 @@ def train_tweets_expert(
             predictions = (bot_prob > 0.5).float()
             train_correct += (predictions == labels).sum().item()
             train_total += labels.size(0)
-
-            update_binary_counts(predictions, labels, train_counts)
-            _, _, f1_running = compute_binary_f1(train_counts)
-
+            
             train_pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'acc': f'{train_correct/train_total:.4f}',
-                'f1': f'{f1_running:.4f}'
+                'acc': f'{train_correct/train_total:.4f}'
             })
-
+        
         avg_train_loss = train_loss / len(train_loader)
         train_acc = train_correct / train_total
-        _, _, train_f1 = compute_binary_f1(train_counts)
         
         # 验证阶段
         model.eval()
         val_loss = 0.0
         val_correct = 0
         val_total = 0
-        val_counts = {'tp': 0, 'fp': 0, 'fn': 0}
         
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
@@ -209,23 +201,18 @@ def train_tweets_expert(
                 predictions = (bot_prob > 0.5).float()
                 val_correct += (predictions == labels).sum().item()
                 val_total += labels.size(0)
-
-                update_binary_counts(predictions, labels, val_counts)
-                _, _, f1_running = compute_binary_f1(val_counts)
-
+                
                 val_pbar.set_postfix({
                     'loss': f'{loss.item():.4f}',
-                    'acc': f'{val_correct/val_total:.4f}',
-                    'f1': f'{f1_running:.4f}'
+                    'acc': f'{val_correct/val_total:.4f}'
                 })
-
+        
         avg_val_loss = val_loss / len(val_loader)
         val_acc = val_correct / val_total
-        _, _, val_f1 = compute_binary_f1(val_counts)
         
         print(f"\nEpoch {epoch+1}/{num_epochs}:")
-        print(f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f}")
-        print(f"  Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+        print(f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_acc:.4f}")
+        print(f"  Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
         # 保存最佳模型
         if avg_val_loss < best_val_loss:
@@ -237,7 +224,6 @@ def train_tweets_expert(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': avg_val_loss,
                 'val_acc': val_acc,
-                'val_f1': val_f1,
             }, model_path)
             print(f"  ✓ 保存最佳模型到: {model_path}")
     
@@ -247,7 +233,6 @@ def train_tweets_expert(
     test_loss = 0.0
     test_correct = 0
     test_total = 0
-    test_counts = {'tp': 0, 'fp': 0, 'fn': 0}
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc='Testing'):
@@ -261,17 +246,13 @@ def train_tweets_expert(
             predictions = (bot_prob > 0.5).float()
             test_correct += (predictions == labels).sum().item()
             test_total += labels.size(0)
-
-            update_binary_counts(predictions, labels, test_counts)
     
     avg_test_loss = test_loss / len(test_loader)
     test_acc = test_correct / test_total
-    _, _, test_f1 = compute_binary_f1(test_counts)
     
     print(f"\n测试结果:")
     print(f"  Test Loss: {avg_test_loss:.4f}")
     print(f"  Test Acc: {test_acc:.4f}")
-    print(f"  Test F1: {test_f1:.4f}")
     
     # 保存最终模型
     final_model_path = os.path.join(save_dir, 'tweets_expert_final.pt')
@@ -279,7 +260,6 @@ def train_tweets_expert(
         'model_state_dict': model.state_dict(),
         'test_loss': avg_test_loss,
         'test_acc': test_acc,
-        'test_f1': test_f1,
     }, final_model_path)
     print(f"\n✓ 保存最终模型到: {final_model_path}")
     
@@ -297,7 +277,7 @@ if __name__ == '__main__':
         'learning_rate': 1e-3,  # 只训练MLP，可以使用更大的学习率
         'num_epochs': 10,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'save_dir': '../autodl-tmp/checkpoints',
+        'save_dir': './checkpoints',
     }
     
     print(f"使用设备: {config['device']}")
