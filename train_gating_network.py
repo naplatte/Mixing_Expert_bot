@@ -7,15 +7,25 @@ import numpy as np
 import os
 from dataset import Twibot20
 from transformers import BertTokenizer
-from model import DesExpert, TweetsExpert, ExpertGatedAggregator
+from model import DesExpert, TweetsExpert, GraphExpert, ExpertGatedAggregator
 from metrics import update_binary_counts, compute_binary_f1
 
 # 联合数据集：同时提供 des 文本（用于 BERT 分词）、tweets 文本列表、标签，以及专家激活掩码
 class CombinedDataset(Dataset):
-    def __init__(self, descriptions, tweets_list, labels, tokenizer, max_length=128):
+    def __init__(self, descriptions, tweets_list, labels, node_indices, tokenizer, max_length=128):
+        """
+        Args:
+            descriptions: description 文本列表
+            tweets_list: 推文列表
+            labels: 标签列表
+            node_indices: 节点在完整图中的索引列表（用于 GraphExpert）
+            tokenizer: BERT tokenizer
+            max_length: 最大序列长度
+        """
         self.descriptions = descriptions
         self.tweets_list = tweets_list
         self.labels = labels
+        self.node_indices = node_indices  # 在完整图中的索引
         self.tokenizer = tokenizer
         self.max_length = max_length
     def __len__(self):
@@ -45,33 +55,38 @@ class CombinedDataset(Dataset):
         if len(cleaned_tweets) == 0:
             cleaned_tweets = ['']
 
-        # 专家激活标记：des 有文本且不为 'None'；tweets 至少有一条非空推文
+        # 专家激活标记：des 有文本且不为 'None'；tweets 至少有一条非空推文；graph 总是可用
         des_active = 1.0 if desc != 'None' else 0.0
         tw_active = 1.0 if not (len(cleaned_tweets) == 1 and cleaned_tweets[0] == '') else 0.0
+        graph_active = 1.0  # GraphExpert 总是可用（图结构总是存在）
 
         return {
             'input_ids': encoded['input_ids'].squeeze(0),
             'attention_mask': encoded['attention_mask'].squeeze(0),
             'tweets_text': cleaned_tweets,
             'label': torch.tensor(label, dtype=torch.float32),
-            'active_mask': torch.tensor([des_active, tw_active], dtype=torch.float32)
+            'node_idx': self.node_indices[idx],  # 在完整图中的索引
+            'active_mask': torch.tensor([des_active, tw_active, graph_active], dtype=torch.float32)
         }
 
 # 组装 batch：
 # - des 输入拼成张量（input_ids/attention_mask）
 # - tweets 保持为列表（每个样本是变长推文列表）
-# - active_mask 为 [batch, num_experts] 的张量
+# - active_mask 为 [batch, num_experts] 的张量（3个专家）
+# - node_indices 为节点在完整图中的索引
 def collate_fn(batch):
     input_ids = torch.stack([item['input_ids'] for item in batch])
     attention_mask = torch.stack([item['attention_mask'] for item in batch])
     labels = torch.stack([item['label'] for item in batch]).unsqueeze(1)
     tweets_text_list = [item['tweets_text'] for item in batch]
+    node_indices = torch.tensor([item['node_idx'] for item in batch], dtype=torch.long)
     active_mask = torch.stack([item['active_mask'] for item in batch])
     return {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
         'label': labels,
         'tweets_text_list': tweets_text_list,
+        'node_indices': node_indices,  # [batch_size] - 节点在完整图中的索引
         'active_mask': active_mask
     }
 
@@ -95,6 +110,25 @@ def load_and_freeze_tweets(tw_ckpt_path, device):
         p.requires_grad = False
     return tw
 
+# 加载并冻结 GraphExpert（只推理，不训练）
+def load_and_freeze_graph(graph_ckpt_path, num_nodes, device):
+    graph = GraphExpert(
+        num_nodes=num_nodes,
+        num_relations=2,
+        node_feature_dim=64,
+        hidden_dim=128,
+        expert_dim=64,
+        num_layers=2,
+        dropout=0.1,
+        device=device
+    ).to(device)
+    ckpt = torch.load(graph_ckpt_path, map_location=device)
+    graph.load_state_dict(ckpt['model_state_dict'])
+    graph.eval()
+    for p in graph.parameters():
+        p.requires_grad = False
+    return graph
+
 # 训练门控网络：
 # - 冻结最优专家模型，按训练/验证/测试划分迭代
 # - 门控接收拼接后的专家表示，输出权重，最终概率按加权和计算
@@ -107,7 +141,8 @@ def train_gating_network(
     save_dir='../autodl-tmp/checkpoints',
     bert_model_name='bert-base-uncased',
     des_ckpt_path='../autodl-tmp/checkpoints/des_expert_best.pt',
-    tw_ckpt_path='../autodl-tmp/checkpoints/tweets_expert_best.pt'
+    tw_ckpt_path='../autodl-tmp/checkpoints/tweets_expert_best.pt',
+    graph_ckpt_path='../autodl-tmp/checkpoints/graph_expert_best.pt'
 ):
     os.makedirs(save_dir, exist_ok=True)
     # 加载数据与原始文本
@@ -115,12 +150,23 @@ def train_gating_network(
     descriptions = dataset.Des_preprocess()
     tweets_list = dataset.tweets_preprogress()
     labels = dataset.load_labels().cpu().numpy()
+    
+    # 构建图结构（用于 GraphExpert）
+    print("\n构建图结构...")
+    edge_index, edge_type = dataset.Build_Graph()
+    num_nodes = len(dataset.df_data)  # 完整图的节点数（包括 support）
+    print(f"图节点总数: {num_nodes}, 边数: {edge_index.shape[1]}")
+    
     if isinstance(descriptions, np.ndarray):
         descriptions = descriptions.tolist()
     if isinstance(tweets_list, np.ndarray):
         tweets_list = tweets_list.tolist()
     train_idx, val_idx, test_idx = dataset.train_val_test_mask()
     train_idx, val_idx, test_idx = list(train_idx), list(val_idx), list(test_idx)
+    
+    # 注意：train_idx, val_idx, test_idx 是在 df_data_labeled 中的索引
+    # 由于 df_data 的前 num_labeled_nodes 个节点与 df_data_labeled 对应
+    # 所以这些索引可以直接用于 df_data（完整图）
     train_desc = [descriptions[i] for i in train_idx]
     val_desc = [descriptions[i] for i in val_idx]
     test_desc = [descriptions[i] for i in test_idx]
@@ -130,18 +176,25 @@ def train_gating_network(
     train_labels = labels[train_idx]
     val_labels = labels[val_idx]
     test_labels = labels[test_idx]
-    # 构建联合数据集与 DataLoader
+    
+    # 构建联合数据集与 DataLoader（传入节点索引）
     tokenizer = BertTokenizer.from_pretrained(bert_model_name)
-    train_ds = CombinedDataset(train_desc, train_tw, train_labels, tokenizer)
-    val_ds = CombinedDataset(val_desc, val_tw, val_labels, tokenizer)
-    test_ds = CombinedDataset(test_desc, test_tw, test_labels, tokenizer)
+    train_ds = CombinedDataset(train_desc, train_tw, train_labels, train_idx, tokenizer)
+    val_ds = CombinedDataset(val_desc, val_tw, val_labels, val_idx, tokenizer)
+    test_ds = CombinedDataset(test_desc, test_tw, test_labels, test_idx, tokenizer)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    # 加载并冻结两个专家；初始化门控聚合器
+    # 加载并冻结三个专家；初始化门控聚合器
+    print("\n加载专家模型...")
     des_expert = load_and_freeze_des(des_ckpt_path, bert_model_name, device)
+    print("  ✓ DesExpert 加载完成")
     tweets_expert = load_and_freeze_tweets(tw_ckpt_path, device)
-    aggregator = ExpertGatedAggregator(num_experts=2, expert_dim=64, hidden_dim=128).to(device)
+    print("  ✓ TweetsExpert 加载完成")
+    graph_expert = load_and_freeze_graph(graph_ckpt_path, num_nodes, device)
+    print("  ✓ GraphExpert 加载完成")
+    aggregator = ExpertGatedAggregator(num_experts=3, expert_dim=64, hidden_dim=128).to(device)
+    print("  ✓ ExpertGatedAggregator 初始化完成")
     criterion = nn.BCELoss()
     optimizer = AdamW(aggregator.parameters(), lr=learning_rate)
     best_val_loss = float('inf')
@@ -157,13 +210,19 @@ def train_gating_network(
             attention_mask = batch['attention_mask'].to(device)
             labels_t = batch['label'].to(device)
             tweets_text_list = batch['tweets_text_list']
+            node_indices = batch['node_indices'].to(device)  # 节点在完整图中的索引
             active_mask = batch['active_mask'].to(device)
             # 冻结专家，前向只用于生成 64d 表示与概率；门控参与反向传播
             optimizer.zero_grad()
             with torch.no_grad():
                 des_repr, des_prob = des_expert(input_ids, attention_mask)
                 tw_repr, tw_prob = tweets_expert(tweets_text_list)
-            final_prob, _ = aggregator([des_repr, tw_repr], [des_prob, tw_prob], active_mask)
+                graph_repr, graph_prob = graph_expert(node_indices, edge_index, edge_type)
+            final_prob, _ = aggregator(
+                [des_repr, tw_repr, graph_repr],
+                [des_prob, tw_prob, graph_prob],
+                active_mask
+            )
             loss = criterion(final_prob, labels_t)
             loss.backward()
             optimizer.step()
@@ -190,10 +249,16 @@ def train_gating_network(
                 attention_mask = batch['attention_mask'].to(device)
                 labels_t = batch['label'].to(device)
                 tweets_text_list = batch['tweets_text_list']
+                node_indices = batch['node_indices'].to(device)
                 active_mask = batch['active_mask'].to(device)
                 des_repr, des_prob = des_expert(input_ids, attention_mask)
                 tw_repr, tw_prob = tweets_expert(tweets_text_list)
-                final_prob, _ = aggregator([des_repr, tw_repr], [des_prob, tw_prob], active_mask)
+                graph_repr, graph_prob = graph_expert(node_indices, edge_index, edge_type)
+                final_prob, _ = aggregator(
+                    [des_repr, tw_repr, graph_repr],
+                    [des_prob, tw_prob, graph_prob],
+                    active_mask
+                )
                 loss = criterion(final_prob, labels_t)
                 val_loss += loss.item()
                 preds = (final_prob > 0.5).float()
@@ -228,10 +293,16 @@ def train_gating_network(
             attention_mask = batch['attention_mask'].to(device)
             labels_t = batch['label'].to(device)
             tweets_text_list = batch['tweets_text_list']
+            node_indices = batch['node_indices'].to(device)
             active_mask = batch['active_mask'].to(device)
             des_repr, des_prob = des_expert(input_ids, attention_mask)
             tw_repr, tw_prob = tweets_expert(tweets_text_list)
-            final_prob, _ = aggregator([des_repr, tw_repr], [des_prob, tw_prob], active_mask)
+            graph_repr, graph_prob = graph_expert(node_indices, edge_index, edge_type)
+            final_prob, _ = aggregator(
+                [des_repr, tw_repr, graph_repr],
+                [des_prob, tw_prob, graph_prob],
+                active_mask
+            )
             loss = criterion(final_prob, labels_t)
             test_loss += loss.item()
             preds = (final_prob > 0.5).float()
@@ -259,7 +330,8 @@ if __name__ == '__main__':
         'save_dir': '../autodl-tmp/checkpoints',
         'bert_model_name': 'bert-base-uncased',
         'des_ckpt_path': '../autodl-tmp/checkpoints/des_expert_best.pt',
-        'tw_ckpt_path': '../autodl-tmp/checkpoints/tweets_expert_best.pt'
+        'tw_ckpt_path': '../autodl-tmp/checkpoints/tweets_expert_best.pt',
+        'graph_ckpt_path': '../autodl-tmp/checkpoints/graph_expert_best.pt'
     }
     print(f"Using device: {config['device']}")
     aggregator = train_gating_network(**config)

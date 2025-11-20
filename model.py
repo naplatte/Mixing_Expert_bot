@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
+from torch_geometric.nn import RGCNConv
 
 # description专家模型
 class DesExpert(nn.Module):
@@ -193,4 +194,181 @@ class TweetsExpert(nn.Module):
     def get_expert_repr(self, tweets_text_list):
         expert_repr, _ = self.forward(tweets_text_list)
         return expert_repr
+
+
+# 图结构专家模型
+class GraphExpert(nn.Module):
+    """
+    Graph Expert Model
+    使用 RGCN (Relational Graph Convolutional Network) 处理异质图
+    输入: 图结构 (edge_index, edge_type) 和节点特征
+    输出: 64维专家表示和 bot 概率
+    """
+    def __init__(self,
+                 num_nodes,
+                 num_relations=2,  # following (0) 和 follower (1) 两种关系
+                 node_feature_dim=64,  # 初始节点特征维度（可以先用随机初始化或简单特征）
+                 hidden_dim=128,
+                 expert_dim=64,
+                 num_layers=2,
+                 dropout=0.1,
+                 device='cuda'):
+        super(GraphExpert, self).__init__()
+        
+        self.num_nodes = num_nodes
+        self.num_relations = num_relations
+        self.node_feature_dim = node_feature_dim
+        self.hidden_dim = hidden_dim
+        self.expert_dim = expert_dim
+        self.device = device
+        
+        # 初始化节点特征（如果后续要融合其他专家特征，可以在这里修改）
+        # 这里先用可学习的嵌入层生成初始节点特征
+        self.node_embedding = nn.Embedding(num_nodes, node_feature_dim)
+        
+        # RGCN 层
+        self.rgcn_layers = nn.ModuleList()
+        # 第一层: node_feature_dim -> hidden_dim
+        self.rgcn_layers.append(
+            RGCNConv(node_feature_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+        )
+        # 中间层: hidden_dim -> hidden_dim
+        for _ in range(num_layers - 2):
+            self.rgcn_layers.append(
+                RGCNConv(hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+            )
+        # 最后一层: hidden_dim -> expert_dim
+        if num_layers > 1:
+            self.rgcn_layers.append(
+                RGCNConv(hidden_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
+            )
+        else:
+            # 如果只有一层，直接从 node_feature_dim -> expert_dim
+            self.rgcn_layers[0] = RGCNConv(node_feature_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Bot Probability 预测头
+        self.bot_classifier = nn.Sequential(
+            nn.Linear(expert_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
     
+    def forward(self, node_indices, edge_index, edge_type):
+        """
+        Args:
+            node_indices: [batch_size] - 当前 batch 中节点的索引（在完整图中的索引）
+            edge_index: [2, num_edges] - 图的边索引
+            edge_type: [num_edges] - 每条边的类型（0: following, 1: follower）
+        
+        Returns:
+            expert_repr: [batch_size, expert_dim] - 专家表示
+            bot_prob: [batch_size, 1] - bot 概率
+        """
+        # 获取所有节点的初始特征 [num_nodes, node_feature_dim]
+        all_node_features = self.node_embedding(torch.arange(self.num_nodes, device=self.device))
+        
+        # 通过 RGCN 层进行图卷积
+        x = all_node_features
+        for i, rgcn_layer in enumerate(self.rgcn_layers):
+            x = rgcn_layer(x, edge_index, edge_type)
+            if i < len(self.rgcn_layers) - 1:  # 最后一层不加激活和dropout
+                x = F.relu(x)
+                x = self.dropout(x)
+        
+        # 提取当前 batch 中节点的表示 [batch_size, expert_dim]
+        batch_node_features = x[node_indices]
+        
+        # Bot Probability 预测
+        bot_prob = self.bot_classifier(batch_node_features)  # [batch_size, 1]
+        
+        return batch_node_features, bot_prob
+    
+    def get_expert_repr(self, node_indices, edge_index, edge_type):
+        """只获取专家表示，不计算 bot 概率"""
+        expert_repr, _ = self.forward(node_indices, edge_index, edge_type)
+        return expert_repr
+    
+    def get_all_node_repr(self, edge_index, edge_type):
+        """
+        获取所有节点的专家表示（用于图嵌入）
+        Returns:
+            all_repr: [num_nodes, expert_dim]
+        """
+        all_node_features = self.node_embedding(torch.arange(self.num_nodes, device=self.device))
+        x = all_node_features
+        for i, rgcn_layer in enumerate(self.rgcn_layers):
+            x = rgcn_layer(x, edge_index, edge_type)
+            if i < len(self.rgcn_layers) - 1:
+                x = F.relu(x)
+                x = self.dropout(x)
+        return x
+
+
+# 门控聚合器：聚合多个专家的输出
+class ExpertGatedAggregator(nn.Module):
+    """
+    门控网络：根据各专家的表示和概率，动态计算权重并聚合
+    """
+    def __init__(self, num_experts=3, expert_dim=64, hidden_dim=128):
+        super(ExpertGatedAggregator, self).__init__()
+        self.num_experts = num_experts
+        self.expert_dim = expert_dim
+        
+        # 门控网络：根据专家表示和概率计算权重
+        # 输入：专家表示拼接 + 专家概率拼接
+        # 输出：每个专家的权重
+        self.gate_network = nn.Sequential(
+            nn.Linear(expert_dim * num_experts + num_experts, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, num_experts),
+            nn.Softmax(dim=-1)
+        )
+    
+    def forward(self, expert_reprs, expert_probs, active_mask):
+        """
+        Args:
+            expert_reprs: List of [batch_size, expert_dim] tensors
+                - 每个专家的表示
+            expert_probs: List of [batch_size, 1] tensors
+                - 每个专家的概率预测
+            active_mask: [batch_size, num_experts]
+                - 1表示专家可用，0表示不可用（例如：没有description或tweets）
+        
+        Returns:
+            final_prob: [batch_size, 1] - 最终聚合的概率
+            gate_weights: [batch_size, num_experts] - 每个专家的权重
+        """
+        batch_size = expert_reprs[0].shape[0]
+        
+        # 拼接所有专家的表示 [batch_size, expert_dim * num_experts]
+        expert_reprs_concat = torch.cat(expert_reprs, dim=1)
+        
+        # 拼接所有专家的概率 [batch_size, num_experts]
+        expert_probs_concat = torch.cat(expert_probs, dim=1)
+        
+        # 门控网络输入：专家表示 + 专家概率
+        gate_input = torch.cat([expert_reprs_concat, expert_probs_concat], dim=1)  # [batch_size, expert_dim * num_experts + num_experts]
+        
+        # 计算门控权重 [batch_size, num_experts]
+        gate_weights = self.gate_network(gate_input)
+        
+        # 应用 active_mask：不可用的专家权重设为0
+        gate_weights = gate_weights * active_mask
+        
+        # 重新归一化（避免除零）
+        gate_weights_sum = gate_weights.sum(dim=1, keepdim=True)
+        gate_weights = gate_weights / (gate_weights_sum + 1e-8)
+        
+        # 加权聚合专家概率
+        weighted_prob = (gate_weights * expert_probs_concat).sum(dim=1, keepdim=True)  # [batch_size, 1]
+        
+        return weighted_prob, gate_weights
+     
