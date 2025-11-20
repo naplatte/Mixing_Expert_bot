@@ -2,7 +2,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
-from torch_geometric.nn import RGCNConv
+try:
+    from torch_geometric.nn import RGCNConv
+    _TORCH_GEOMETRIC_AVAILABLE = True
+except ImportError as _tg_err:
+    RGCNConv = None
+    _TORCH_GEOMETRIC_AVAILABLE = False
 
 # description专家模型
 class DesExpert(nn.Module):
@@ -198,16 +203,11 @@ class TweetsExpert(nn.Module):
 
 # 图结构专家模型
 class GraphExpert(nn.Module):
-    """
-    Graph Expert Model
-    使用 RGCN (Relational Graph Convolutional Network) 处理异质图
-    输入: 图结构 (edge_index, edge_type) 和节点特征
-    输出: 64维专家表示和 bot 概率
-    """
+    # 输入: 图结构 (edge_index, edge_type) 和节点特征
     def __init__(self,
                  num_nodes,
+                 node_features,
                  num_relations=2,  # following (0) 和 follower (1) 两种关系
-                 node_feature_dim=64,  # 初始节点特征维度（可以先用随机初始化或简单特征）
                  hidden_dim=128,
                  expert_dim=64,
                  num_layers=2,
@@ -215,22 +215,25 @@ class GraphExpert(nn.Module):
                  device='cuda'):
         super(GraphExpert, self).__init__()
         
+        if not _TORCH_GEOMETRIC_AVAILABLE:
+            raise ImportError("需要安装 torch_geometric 才能使用 GraphExpert。安装方法: pip install torch-geometric")
+        
         self.num_nodes = num_nodes
         self.num_relations = num_relations
-        self.node_feature_dim = node_feature_dim
         self.hidden_dim = hidden_dim
         self.expert_dim = expert_dim
         self.device = device
         
-        # 初始化节点特征（如果后续要融合其他专家特征，可以在这里修改）
-        # 这里先用可学习的嵌入层生成初始节点特征
-        self.node_embedding = nn.Embedding(num_nodes, node_feature_dim)
+        # 节点结构特征（预先计算），注册为 buffer，随模型保存/加载
+        node_features = node_features.to(device if device == 'cuda' and torch.cuda.is_available() else 'cpu')
+        self.register_buffer('node_features', node_features)
         
         # RGCN 层
         self.rgcn_layers = nn.ModuleList()
-        # 第一层: node_feature_dim -> hidden_dim
+        input_dim = node_features.shape[1]
+        # 第一层: input_dim -> hidden_dim
         self.rgcn_layers.append(
-            RGCNConv(node_feature_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+            RGCNConv(input_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
         )
         # 中间层: hidden_dim -> hidden_dim
         for _ in range(num_layers - 2):
@@ -243,8 +246,8 @@ class GraphExpert(nn.Module):
                 RGCNConv(hidden_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
             )
         else:
-            # 如果只有一层，直接从 node_feature_dim -> expert_dim
-            self.rgcn_layers[0] = RGCNConv(node_feature_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
+            # 如果只有一层，直接从输入维度 -> expert_dim
+            self.rgcn_layers[0] = RGCNConv(input_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
         
         self.dropout = nn.Dropout(dropout)
         
@@ -268,11 +271,8 @@ class GraphExpert(nn.Module):
             expert_repr: [batch_size, expert_dim] - 专家表示
             bot_prob: [batch_size, 1] - bot 概率
         """
-        # 获取所有节点的初始特征 [num_nodes, node_feature_dim]
-        all_node_features = self.node_embedding(torch.arange(self.num_nodes, device=self.device))
-        
         # 通过 RGCN 层进行图卷积
-        x = all_node_features
+        x = self.node_features
         for i, rgcn_layer in enumerate(self.rgcn_layers):
             x = rgcn_layer(x, edge_index, edge_type)
             if i < len(self.rgcn_layers) - 1:  # 最后一层不加激活和dropout

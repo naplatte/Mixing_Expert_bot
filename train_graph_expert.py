@@ -51,7 +51,6 @@ def train_graph_expert(
     num_epochs=10,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='../autodl-tmp/checkpoints',
-    node_feature_dim=64,
     hidden_dim=128,
     expert_dim=64,
     num_layers=2,
@@ -67,7 +66,6 @@ def train_graph_expert(
         num_epochs: 训练轮数
         device: 设备
         save_dir: 模型保存目录
-        node_feature_dim: 节点特征维度
         hidden_dim: 隐藏层维度
         expert_dim: 专家表示维度
         num_layers: RGCN 层数
@@ -93,6 +91,9 @@ def train_graph_expert(
     print(f"   有标签节点数: {num_labeled_nodes}")
     print(f"   边数: {edge_index.shape[1]}")
     print(f"   关系类型数: {edge_type.max().item() + 1}")
+    
+    # 节点结构特征
+    node_features = twibot_dataset.get_node_features()
     
     # 获取标签（只对有标签的节点）
     labels = twibot_dataset.load_labels()
@@ -134,8 +135,8 @@ def train_graph_expert(
     print("\n3. 初始化模型...")
     model = GraphExpert(
         num_nodes=num_nodes,
+        node_features=node_features,
         num_relations=2,  # following 和 follower
-        node_feature_dim=node_feature_dim,
         hidden_dim=hidden_dim,
         expert_dim=expert_dim,
         num_layers=num_layers,
@@ -296,7 +297,6 @@ if __name__ == '__main__':
         'num_epochs': 10,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'save_dir': '../autodl-tmp/checkpoints',
-        'node_feature_dim': 64,
         'hidden_dim': 128,
         'expert_dim': 64,
         'num_layers': 2,

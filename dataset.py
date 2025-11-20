@@ -1,13 +1,9 @@
-from pydoc import describe
-from xml.sax.handler import feature_external_pes
-
 import torch
 import numpy as np
 import pandas as pd
 import json
 import os
 
-from accelerate.commands.merge import description
 from transformers import pipeline
 from datetime import datetime as dt
 from torch.utils.data import Dataset
@@ -39,7 +35,7 @@ class Twibot20(Dataset):
 
             # 拼接数据集,拼接后重新生成连续的索引
             self.df_data_labeled = pd.concat([df_train,df_test,df_dev],ignore_index=True) # 整合带标签的数据集
-            self.df_data=pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
+            self.df_data = pd.concat([df_train,df_test,df_dev,df_support],ignore_index=True) # 全部数据集
 
             self.save = save
 
@@ -132,7 +128,7 @@ class Twibot20(Dataset):
                 tweets = tweets.tolist()
             except Exception:
                 pass
-        print('tweets_preprogress finished')
+        print('推文数据预处理完成')
         return tweets
 
     # 构建异质图
@@ -179,6 +175,50 @@ class Twibot20(Dataset):
         print('构建异质图完成')
         return edge_index, edge_type
 
+    # 计算并获取图结构的节点特征（基于度等结构信息）
+    def get_node_features(self):
+        print('加载节点结构特征...', end=' ')
+        path = os.path.join(self.root, 'node_features.pt')
+        if not os.path.exists(path):
+            num_nodes = len(self.df_data)
+            features = np.zeros((num_nodes, 4), dtype=np.float32)
+            for i, relation in enumerate(self.df_data['neighbor']):
+                if relation is None:
+                    continue
+                following = relation.get('following', []) if isinstance(relation, dict) else []
+                follower = relation.get('follower', []) if isinstance(relation, dict) else []
+                # 确保为列表
+                if following is None:
+                    following = []
+                if follower is None:
+                    follower = []
+                following_set = set()
+                follower_set = set()
+                for each in following:
+                    try:
+                        following_set.add(int(each))
+                    except (ValueError, TypeError):
+                        continue
+                for each in follower:
+                    try:
+                        follower_set.add(int(each))
+                    except (ValueError, TypeError):
+                        continue
+                follow_cnt = len(following_set)
+                follower_cnt = len(follower_set)
+                total_cnt = follow_cnt + follower_cnt
+                mutual_cnt = len(following_set & follower_set)
+                features[i] = [follow_cnt, follower_cnt, total_cnt, mutual_cnt]
+            # 缩放，避免过大
+            features = np.log1p(features)
+            node_features = torch.tensor(features, dtype=torch.float32)
+            if self.save:
+                torch.save(node_features, path)
+        else:
+            node_features = torch.load(path)
+        print('完成')
+        return node_features
+
     # 明确训练集、验证集、测试集在拼接后的标签数据中的索引范围
     def train_val_test_mask(self):
         train_idx = range(8278)
@@ -186,13 +226,3 @@ class Twibot20(Dataset):
         test_idx = range(8278+2365,8278+2365+1183)
         return train_idx,val_idx,test_idx
 
-    # 先只关注description数据进行加载分析
-    # def dataloader(self):
-    #     labels = self.load_labels()
-    #     if self.process:
-    #         self.Des_preprocess()
-    #         # self.tweets_preprocess()
-    #     des_tensor = self.Des_embedding()
-    #
-    #     train_idx,val_idx,test_idx = self.train_val_test_mask()
-    #     return des_tensor,train_idx,val_idx,test_idx

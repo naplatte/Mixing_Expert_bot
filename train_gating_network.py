@@ -111,11 +111,11 @@ def load_and_freeze_tweets(tw_ckpt_path, device):
     return tw
 
 # 加载并冻结 GraphExpert（只推理，不训练）
-def load_and_freeze_graph(graph_ckpt_path, num_nodes, device):
+def load_and_freeze_graph(graph_ckpt_path, num_nodes, node_features, device):
     graph = GraphExpert(
         num_nodes=num_nodes,
+        node_features=node_features,
         num_relations=2,
-        node_feature_dim=64,
         hidden_dim=128,
         expert_dim=64,
         num_layers=2,
@@ -155,6 +155,7 @@ def train_gating_network(
     print("\n构建图结构...")
     edge_index, edge_type = dataset.Build_Graph()
     num_nodes = len(dataset.df_data)  # 完整图的节点数（包括 support）
+    node_features = dataset.get_node_features()
     print(f"图节点总数: {num_nodes}, 边数: {edge_index.shape[1]}")
     
     if isinstance(descriptions, np.ndarray):
@@ -191,7 +192,7 @@ def train_gating_network(
     print("  ✓ DesExpert 加载完成")
     tweets_expert = load_and_freeze_tweets(tw_ckpt_path, device)
     print("  ✓ TweetsExpert 加载完成")
-    graph_expert = load_and_freeze_graph(graph_ckpt_path, num_nodes, device)
+    graph_expert = load_and_freeze_graph(graph_ckpt_path, num_nodes, node_features, device)
     print("  ✓ GraphExpert 加载完成")
     aggregator = ExpertGatedAggregator(num_experts=3, expert_dim=64, hidden_dim=128).to(device)
     print("  ✓ ExpertGatedAggregator 初始化完成")
