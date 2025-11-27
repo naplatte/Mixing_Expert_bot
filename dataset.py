@@ -21,7 +21,7 @@ class Twibot20(Dataset):
             print('加载 test.json')
             df_test = pd.read_json('../autodl-tmp/Data/test.json')
             print('加载 support.json')
-            df_support = pd.read_json('../autodl-tmp/Data/support.json')
+            df_support = pd.read_json('../autodl-fs/support.json')
             print('加载 dev.json')
             df_dev = pd.read_json('../autodl-tmp/Data/dev.json')
             print('Finished')
@@ -34,22 +34,22 @@ class Twibot20(Dataset):
             df_support['label'] = 'None' # 支持集没有标签信息
 
             # 拼接数据集,拼接后重新生成连续的索引
-            self.df_data_labeled = pd.concat([df_train,df_test,df_dev],ignore_index=True) # 整合带标签的数据集
-            self.df_data = pd.concat([df_train,df_test,df_dev,df_support],ignore_index=True) # 全部数据集
+            self.df_data_labeled = pd.concat([df_train,df_dev,df_test],ignore_index=True) # 整合带标签的数据集
+            self.df_data = pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
 
             self.save = save
 
     # 生成/加载label.pt（） - 所有user的标签信息
     def load_labels(self):
-        print('加载 labels...',end=' ')
-        path = self.root + 'label.pt'
+        print('加载 labels...', end=' ')
+        path = os.path.join(self.root, 'label.pt')
         if not os.path.exists(path):
-            labels = torch.LongTensor(self.df_data_labeled['label']).to(self.device) # 提取label列转换为张量，可通过 .to() 方法在不同设备间移动：
+            labels = torch.LongTensor(self.df_data_labeled['label'].values).to(self.device)
             if self.save:
-                torch.save(labels,'./processed_data/label.pt')
+                torch.save(labels, path)
         else:
-            labels = torch.load(self.root + "label.pt").to(self.device)
-        print("load_labels finished")
+            labels = torch.load(path).to(self.device)
+        print('load_labels 完成')
         return labels
 
     # 用户简介处理 —— 这里可以看出，用户简介为空时，对应的填充值为None（联系专家系统应对特征不全的场景）
@@ -71,37 +71,6 @@ class Twibot20(Dataset):
             description = np.load(path, allow_pickle=True) # allow_pickle=True 允许加载包含字符串等 Python 对象的数组
         print('Des_preprocess finished')
         return description
-
-    # 获取简介特征表示（嵌入）:因为其使用的是未经过微调的roberta，混合专家系统中需要使用微调的bert生成句向量
-    # def Des_embedding(self):
-    #     print('开始简介description特征嵌入')
-    #     path = self.root + "des_tensor.pt"
-    #     if not os.path.exists(path):
-    #         description = np.load(os.path.join(self.root, 'description.npy'), allow_pickle=True)
-    #         # 使用预训练语言模型获得嵌入表示 - distilroberta-base的隐藏层维度（即每个 token 的嵌入维度）为768 维
-    #         print('加载 RoBerta')
-    #         feature_extraction = pipeline('feature-extraction',model = "distilroberta-base",tokenizer="distilroberta-base",device=0) # 使用 Hugging Face 的 pipeline 创建 feature-extraction 任务处理器
-    #         des_vec = []
-    #         for each in tqdm(description):
-    #             feature = torch.Tensor(feature_extraction(each))
-    #             # 先累加一个句子中的所有词向量
-    #             feature_tensor = None
-    #             for (i, tensor) in enumerate(feature[0]):
-    #                 if i == 0:
-    #                     feature_tensor = tensor
-    #                 else:
-    #                     feature_tensor += tensor
-    #
-    #             # 对句子中所有词向量取平均（只计算一次）
-    #             feature_tensor /= feature.shape[1]
-    #             des_vec.append(feature_tensor)  # 每个句子只append一次
-    #         des_tensor = torch.stack(des_vec,0).to(self.device)
-    #         if self.save:
-    #             torch.save(des_tensor,'./Data/des_tensor.pt')
-    #     else:
-    #         des_tensor = torch.load(self.root + "des_tensor.pt").to(self.device)
-    #     print("finished")
-    #     return des_tensor
 
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
     def tweets_preprogress(self):
@@ -174,50 +143,6 @@ class Twibot20(Dataset):
         
         print('构建异质图完成')
         return edge_index, edge_type
-
-    # 计算并获取图结构的节点特征（基于度等结构信息）
-    def get_node_features(self):
-        print('加载节点结构特征...', end=' ')
-        path = os.path.join(self.root, 'node_features.pt')
-        if not os.path.exists(path):
-            num_nodes = len(self.df_data)
-            features = np.zeros((num_nodes, 4), dtype=np.float32)
-            for i, relation in enumerate(self.df_data['neighbor']):
-                if relation is None:
-                    continue
-                following = relation.get('following', []) if isinstance(relation, dict) else []
-                follower = relation.get('follower', []) if isinstance(relation, dict) else []
-                # 确保为列表
-                if following is None:
-                    following = []
-                if follower is None:
-                    follower = []
-                following_set = set()
-                follower_set = set()
-                for each in following:
-                    try:
-                        following_set.add(int(each))
-                    except (ValueError, TypeError):
-                        continue
-                for each in follower:
-                    try:
-                        follower_set.add(int(each))
-                    except (ValueError, TypeError):
-                        continue
-                follow_cnt = len(following_set)
-                follower_cnt = len(follower_set)
-                total_cnt = follow_cnt + follower_cnt
-                mutual_cnt = len(following_set & follower_set)
-                features[i] = [follow_cnt, follower_cnt, total_cnt, mutual_cnt]
-            # 缩放，避免过大
-            features = np.log1p(features)
-            node_features = torch.tensor(features, dtype=torch.float32)
-            if self.save:
-                torch.save(node_features, path)
-        else:
-            node_features = torch.load(path)
-        print('完成')
-        return node_features
 
     # 明确训练集、验证集、测试集在拼接后的标签数据中的索引范围
     def train_val_test_mask(self):

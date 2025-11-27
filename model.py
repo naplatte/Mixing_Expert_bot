@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
+from transformers import BertModel, AutoModel, AutoTokenizer
 try:
     from torch_geometric.nn import RGCNConv
     _TORCH_GEOMETRIC_AVAILABLE = True
@@ -15,12 +15,22 @@ class DesExpert(nn.Module):
                  bert_model_name='bert-base-uncased',
                  hidden_dim=768,
                  expert_dim=64,
-                 dropout=0.1):
+                 dropout=0.1,
+                 freeze_bert=True):
 
         super(DesExpert, self).__init__()
         
-        # BERT Encoder (fine-tuned)
+        # whether to freeze BERT parameters (use BERT as fixed feature extractor)
+        self.freeze_bert = freeze_bert
+
+        # BERT Encoder
         self.bert = BertModel.from_pretrained(bert_model_name)
+        if self.freeze_bert:
+            # 冻结bert参数，设置eval模式
+            for param in self.bert.parameters():
+                param.requires_grad = False
+            self.bert.eval()
+
         self.hidden_dim = hidden_dim
         
         # MLP 网络
@@ -49,9 +59,15 @@ class DesExpert(nn.Module):
     # attention_mask:[batch_size,seq_len]，mask 掩码（1表示有效，0表示padding）（短句子会被填充至seq_len长度，填充部分的mask掩码为0，文本部分为1），告诉 BERT 哪些 token 是 padding（0 表示忽略）
     def forward(self, input_ids, attention_mask=None):
         # 以下两步本质就是从初始输入input_ids获取到最终句向量cls_embedding
-        bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask) # BERT 接收到这两个输入后，会对每个 token 做注意力计算，输出对应的上下文表示（每个token的向量表示768维、句子向量768维）
-        cls_embedding = bert_outputs.pooler_output  # [batch_size, 768] # 每个输入句子的 整体语义向量（768维），类似之前des处理时的所有token取平均得到句子向量，这里原理类似
-        
+        if self.freeze_bert:
+            # use BERT as frozen feature extractor to save memory and computation
+            with torch.no_grad():
+                bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        else:
+            bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+
+        cls_embedding = bert_outputs.pooler_output  # [batch_size, 768]
+
         # MLP: 768维 → 64维 Expert Representation
         expert_repr = self.mlp(cls_embedding)  # 专家表示，shape:[batch_size, 64]
         
@@ -62,7 +78,11 @@ class DesExpert(nn.Module):
 
     # 只获取专家表示，用于 gating network 使用
     def get_expert_repr(self, input_ids, attention_mask=None):
-        bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        if self.freeze_bert:
+            with torch.no_grad():
+                bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        else:
+            bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = bert_outputs.pooler_output
         expert_repr = self.mlp(cls_embedding)
         return expert_repr
@@ -371,4 +391,3 @@ class ExpertGatedAggregator(nn.Module):
         weighted_prob = (gate_weights * expert_probs_concat).sum(dim=1, keepdim=True)  # [batch_size, 1]
         
         return weighted_prob, gate_weights
-     
