@@ -1,7 +1,3 @@
-"""
-通用专家训练器
-支持任意专家模型的训练/验证/测试，实现代码复用
-"""
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -15,10 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.metrics import update_binary_counts, compute_binary_f1
 
-
+# 通用专家训练器 - 支持任意专家模型的训练/验证/测试
 class ExpertTrainer:
-    """通用专家训练器 - 支持任意专家模型的训练/验证/测试"""
-    
     def __init__(self, expert_config):
         """
         Args:

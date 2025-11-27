@@ -31,6 +31,13 @@
           </mappings>
         </serverdata>
       </paths>
+      <paths name="root@connect.nmb1.seetacloud.com:33841 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
       <paths name="root@connect.nmb1.seetacloud.com:34933 password">
         <serverdata>
           <mappings>
