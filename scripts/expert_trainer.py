@@ -68,8 +68,14 @@ class ExpertTrainer:
         pbar = tqdm(self.train_loader, desc=f"[{self.name.upper()}] Epoch {epoch} [Train]")
         for batch in pbar:
             # 提取数据(适配不同专家)
-            inputs, labels = self.extract_fn(batch, self.device)
-            
+            # extract_fn可能返回2个值(旧版)或3个值(新版，带has_data标记)
+            result = self.extract_fn(batch, self.device)
+            if len(result) == 3:
+                inputs, labels, has_data = result
+            else:
+                inputs, labels = result
+                has_data = None
+
             self.optimizer.zero_grad()
             
             # 前向传播
@@ -116,22 +122,44 @@ class ExpertTrainer:
         total_loss = 0
         correct = 0
         total = 0
+        valid_total = 0  # 有效样本总数
         counts = {'tp': 0, 'fp': 0, 'fn': 0}
         
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc=f"[{self.name.upper()}] Epoch {epoch} [Val]")
             for batch in pbar:
-                inputs, labels = self.extract_fn(batch, self.device)
-                
+                # extract_fn可能返回2个值或3个值
+                result = self.extract_fn(batch, self.device)
+                if len(result) == 3:
+                    inputs, labels, has_data = result
+                else:
+                    inputs, labels = result
+                    has_data = None
+
                 _, bot_prob = self.model(*inputs)
                 loss = self.criterion(bot_prob, labels)
                 
                 total_loss += loss.item()
                 predictions = (bot_prob > 0.5).float()
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
-                
-                update_binary_counts(predictions, labels, counts)
+
+                # 如果有has_data标记，只在有效样本上计算指标
+                if has_data is not None:
+                    valid_mask = has_data.bool().view(-1)
+                    valid_preds = predictions[valid_mask]
+                    valid_labels = labels[valid_mask]
+
+                    correct += (valid_preds == valid_labels).sum().item()
+                    valid_total += valid_labels.size(0)
+                    total += labels.size(0)
+
+                    if valid_labels.size(0) > 0:
+                        update_binary_counts(valid_preds, valid_labels, counts)
+                else:
+                    correct += (predictions == labels).sum().item()
+                    total += labels.size(0)
+                    valid_total += labels.size(0)
+                    update_binary_counts(predictions, labels, counts)
+
                 _, _, f1_running = compute_binary_f1(counts)
                 
                 pbar.set_postfix({
@@ -142,9 +170,13 @@ class ExpertTrainer:
         
         # 计算最终指标
         avg_loss = total_loss / len(self.val_loader)
-        acc = correct / total
+        acc = correct / valid_total if valid_total > 0 else 0
         precision, recall, f1 = compute_binary_f1(counts)
         
+        # 如果过滤了无效样本，显示统计信息
+        if valid_total < total:
+            print(f"  [验证集] 总样本: {total}, 有效样本: {valid_total} (过滤 {total - valid_total} 个无效样本)")
+
         # 保存最佳模型
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
@@ -170,27 +202,52 @@ class ExpertTrainer:
         total_loss = 0
         correct = 0
         total = 0
+        valid_total = 0  # 有效样本总数
         counts = {'tp': 0, 'fp': 0, 'fn': 0}
         
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc=f"[{self.name.upper()}] Testing"):
-                inputs, labels = self.extract_fn(batch, self.device)
-                
+                # extract_fn可能返回2个值或3个值
+                result = self.extract_fn(batch, self.device)
+                if len(result) == 3:
+                    inputs, labels, has_data = result
+                else:
+                    inputs, labels = result
+                    has_data = None
+
                 _, bot_prob = self.model(*inputs)
                 loss = self.criterion(bot_prob, labels)
                 
                 total_loss += loss.item()
                 predictions = (bot_prob > 0.5).float()
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
-                
-                update_binary_counts(predictions, labels, counts)
-        
+
+                # 如果有has_data标记，只在有效样本上计算指标
+                if has_data is not None:
+                    valid_mask = has_data.bool().view(-1)
+                    valid_preds = predictions[valid_mask]
+                    valid_labels = labels[valid_mask]
+
+                    correct += (valid_preds == valid_labels).sum().item()
+                    valid_total += valid_labels.size(0)
+                    total += labels.size(0)
+
+                    if valid_labels.size(0) > 0:
+                        update_binary_counts(valid_preds, valid_labels, counts)
+                else:
+                    correct += (predictions == labels).sum().item()
+                    total += labels.size(0)
+                    valid_total += labels.size(0)
+                    update_binary_counts(predictions, labels, counts)
+
         # 计算最终指标
         avg_loss = total_loss / len(self.test_loader)
-        acc = correct / total
+        acc = correct / valid_total if valid_total > 0 else 0
         precision, recall, f1 = compute_binary_f1(counts)
         
+        # 如果过滤了无效样本，显示统计信息
+        if valid_total < total:
+            print(f"  [测试集] 总样本: {total}, 有效样本: {valid_total} (过滤 {total - valid_total} 个无效样本)")
+
         return {
             'loss': avg_loss,
             'acc': acc,

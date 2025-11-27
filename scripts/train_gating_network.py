@@ -57,13 +57,20 @@ class CombinedDataset(Dataset):
             s = str(t).strip()
             if s != '' and s != 'None':
                 cleaned_tweets.append(s)
+
+        # 判断是否有有效推文（在清理前）
+        has_tweets = len(cleaned_tweets) > 0
+
         # 若无有效推文，保留一个空字符串以触发 TweetsExpert 的零表示逻辑
         if len(cleaned_tweets) == 0:
             cleaned_tweets = ['']
 
-        # 专家激活标记：des 有文本且不为 'None'；tweets 至少有一条非空推文；graph 总是可用
-        des_active = 1.0 if desc != 'None' else 0.0
-        tw_active = 1.0 if not (len(cleaned_tweets) == 1 and cleaned_tweets[0] == '') else 0.0
+        # 专家激活标记：
+        # - des_active: 简介不为空且不为'None'
+        # - tw_active: 有有效推文（清理后长度>0）
+        # - graph_active: 图结构总是可用
+        des_active = 1.0 if (desc.strip() != '' and desc.strip().lower() != 'none') else 0.0
+        tw_active = 1.0 if has_tweets else 0.0
         graph_active = 1.0  # GraphExpert 总是可用（图结构总是存在）
 
         return {

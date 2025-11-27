@@ -35,6 +35,9 @@ class DescriptionDataset(Dataset):
         description = str(self.descriptions[idx])
         label = self.labels[idx]
 
+        # 判断是否有有效简介（非空且非'None'）
+        has_description = description.strip() != '' and description.strip().lower() != 'none'
+
         # Tokenize
         encoded = self.tokenizer(
             description,
@@ -47,7 +50,8 @@ class DescriptionDataset(Dataset):
         return {
             'input_ids': encoded['input_ids'].squeeze(0),
             'attention_mask': encoded['attention_mask'].squeeze(0),
-            'label': torch.tensor(label, dtype=torch.float32)
+            'label': torch.tensor(label, dtype=torch.float32),
+            'has_description': has_description  # 新增：标记是否有有效简介
         }
 
 
@@ -130,7 +134,8 @@ def create_des_expert_config(
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['label'].to(device).unsqueeze(1)
-        return (input_ids, attention_mask), labels
+        has_description = batch['has_description'].to(device)
+        return (input_ids, attention_mask), labels, has_description
 
     return {
         'name': 'des',
@@ -149,10 +154,43 @@ def create_des_expert_config(
 # ==================== Tweets Expert ====================
 
 class TweetsDataset(Dataset):
-    """Tweets 专家数据集"""
-    def __init__(self, tweets_list, labels):
-        self.tweets_list = tweets_list
+    def __init__(self, tweets_list, labels, mode='train'):
+        """
+        Args:
+            tweets_list: 推文列表
+            labels: 标签列表
+            mode: 'train' | 'val' | 'test'
+                  - train: 过滤掉没有推文的样本
+                  - val/test: 保留所有样本（但标记有效性）
+        """
+        self.mode = mode
         self.labels = labels
+
+        if mode == 'train':
+            # 训练时：过滤掉没有推文的样本
+            valid_indices = []
+            for idx, user_tweets in enumerate(tweets_list):
+                cleaned = self._clean_tweets(user_tweets)
+                if len(cleaned) > 0:
+                    valid_indices.append(idx)
+
+            self.tweets_list = [tweets_list[i] for i in valid_indices]
+            self.labels = [labels[i] for i in valid_indices]
+            print(f"  [训练集] 过滤前: {len(tweets_list)}, 过滤后: {len(self.tweets_list)} (移除 {len(tweets_list) - len(self.tweets_list)} 个无推文样本)")
+        else:
+            # 验证/测试时：保留所有样本
+            self.tweets_list = tweets_list
+            self.labels = labels
+
+    def _clean_tweets(self, user_tweets):
+        """清理推文文本"""
+        cleaned = []
+        if isinstance(user_tweets, list):
+            for tweet in user_tweets:
+                tweet_str = str(tweet).strip()
+                if tweet_str != '' and tweet_str != 'None':
+                    cleaned.append(tweet_str)
+        return cleaned
 
     def __len__(self):
         return len(self.tweets_list)
@@ -162,31 +200,31 @@ class TweetsDataset(Dataset):
         label = self.labels[idx]
 
         # 清理推文文本
-        cleaned_tweets = []
-        for tweet in user_tweets:
-            tweet_str = str(tweet).strip()
-            if tweet_str != '' and tweet_str != 'None':
-                cleaned_tweets.append(tweet_str)
+        cleaned_tweets = self._clean_tweets(user_tweets)
+        has_tweets = len(cleaned_tweets) > 0
 
+        # 如果没有有效推文，使用特殊标记
         if len(cleaned_tweets) == 0:
-            cleaned_tweets = ['']
+            cleaned_tweets = ['[NO_TWEETS]']
 
         return {
             'tweets_text': cleaned_tweets,
-            'label': torch.tensor(label, dtype=torch.float32)
+            'label': torch.tensor(label, dtype=torch.float32),
+            'has_tweets': has_tweets
         }
 
-
+# 将一个 batch 中每个样本的推文文本列表、标签和 `has_tweets` 标记分别整理成列表和张量，打包成字典供模型输入
+# 返回值 - 1个字典，包含：3个key（'tweets_text_list', 'label', 'has_tweets'），通过隐含的索引i和df_data_labeled的数据一一对应
 def collate_tweets_fn(batch):
-    """处理变长的推文列表"""
     tweets_text_lists = [item['tweets_text'] for item in batch]
     labels = torch.stack([item['label'] for item in batch])
+    has_tweets = torch.tensor([item['has_tweets'] for item in batch], dtype=torch.float32)
 
     return {
         'tweets_text_list': tweets_text_lists,
-        'label': labels
+        'label': labels,
+        'has_tweets': has_tweets  # 新增：标记每个用户是否有有效推文
     }
-
 
 def create_tweets_expert_config(
     dataset_path='./processed_data',
@@ -198,7 +236,6 @@ def create_tweets_expert_config(
 ):
     """
     创建 Tweets Expert 配置
-
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
     """
@@ -243,9 +280,9 @@ def create_tweets_expert_config(
 
     # 创建数据集和数据加载器
     print("创建数据加载器...")
-    train_dataset = TweetsDataset(train_tweets, train_labels)
-    val_dataset = TweetsDataset(val_tweets, val_labels)
-    test_dataset = TweetsDataset(test_tweets, test_labels)
+    train_dataset = TweetsDataset(train_tweets, train_labels, mode='train')
+    val_dataset = TweetsDataset(val_tweets, val_labels, mode='val')
+    test_dataset = TweetsDataset(test_tweets, test_labels, mode='test')
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_tweets_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_tweets_fn)
@@ -265,7 +302,8 @@ def create_tweets_expert_config(
     def extract_fn(batch, device):
         tweets_text_list = batch['tweets_text_list']
         labels = batch['label'].to(device).unsqueeze(1)
-        return (tweets_text_list,), labels
+        has_tweets = batch['has_tweets'].to(device)
+        return (tweets_text_list,), labels, has_tweets
 
     return {
         'name': 'tweets',
@@ -291,11 +329,9 @@ EXPERT_CONFIGS = {
     # 'metadata': create_metadata_expert_config,
 }
 
-
+# 获取专家配置
 def get_expert_config(expert_name, **kwargs):
     """
-    获取专家配置
-
     Args:
         expert_name: 专家名称 ('des', 'tweets', 'graph', etc.)
         **kwargs: 传递给配置函数的参数

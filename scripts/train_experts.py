@@ -13,19 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scripts.expert_trainer import ExpertTrainer
 from configs.expert_configs import get_expert_config
 
-
+# 训练单个专家
 def train_single_expert(expert_name, config_params, num_epochs=10):
-    """
-    训练单个专家
-
-    Args:
-        expert_name: 专家名称 ('des', 'tweets', etc.)
-        config_params: 配置参数字典
-        num_epochs: 训练轮数
-
-    Returns:
-        dict: 训练历史
-    """
     # 获取专家配置
     config = get_expert_config(expert_name, **config_params)
 
