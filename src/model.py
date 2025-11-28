@@ -2,8 +2,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import BertModel, AutoModel, AutoTokenizer
-from torch_geometric.nn import RGCNConv
-_TORCH_GEOMETRIC_AVAILABLE = True
+try:
+    from torch_geometric.nn import RGCNConv
+    _TORCH_GEOMETRIC_AVAILABLE = True
+except ImportError as _tg_err:
+    RGCNConv = None
+    _TORCH_GEOMETRIC_AVAILABLE = False
 
 # description专家模型
 class DesExpert(nn.Module):

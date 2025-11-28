@@ -96,7 +96,7 @@ def main():
                         help='要训练的专家 (des, tweets, all)')
     parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
-    parser.add_argument('--checkpoint_dir', type=str, default='../autodl-tmp/checkpoints',
+    parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-tmp/checkpoints',
                         help='模型保存目录')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='批次大小')

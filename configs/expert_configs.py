@@ -25,11 +25,32 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 class DescriptionDataset(Dataset):
     """Description 专家数据集"""
-    def __init__(self, descriptions, labels, tokenizer, max_length=128):
-        self.descriptions = descriptions
-        self.labels = labels
+    def __init__(self, descriptions, labels, tokenizer, max_length=128, mode='train'):
+        """
+        Args:
+            descriptions: 简介列表
+            labels: 标签列表
+            tokenizer: BERT tokenizer
+            max_length: 最大序列长度
+            mode: 'train' | 'val' | 'test'
+                  所有阶段都过滤掉空简介的样本
+        """
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.mode = mode
+
+        # 所有阶段都过滤掉空简介的样本
+        valid_indices = []
+        for idx, desc in enumerate(descriptions):
+            desc_str = str(desc).strip()
+            if desc_str != '' and desc_str.lower() != 'none':
+                valid_indices.append(idx)
+
+        self.descriptions = [descriptions[i] for i in valid_indices]
+        self.labels = [labels[i] for i in valid_indices]
+
+        filtered_count = len(descriptions) - len(self.descriptions)
+        print(f"  [{mode}集] 有效样本: {len(self.descriptions)}/{len(descriptions)} (过滤 {filtered_count} 个空简介样本)")
 
     def __len__(self):
         return len(self.descriptions)
@@ -38,10 +59,7 @@ class DescriptionDataset(Dataset):
         description = str(self.descriptions[idx])
         label = self.labels[idx]
 
-        # 判断是否有有效简介（非空且非'None'）
-        has_description = description.strip() != '' and description.strip().lower() != 'none'
-
-        # Tokenize
+        # Tokenize（保证非空）
         encoded = self.tokenizer(
             description,
             max_length=self.max_length,
@@ -53,8 +71,7 @@ class DescriptionDataset(Dataset):
         return {
             'input_ids': encoded['input_ids'].squeeze(0),
             'attention_mask': encoded['attention_mask'].squeeze(0),
-            'label': torch.tensor(label, dtype=torch.float32),
-            'has_description': has_description  # 新增：标记是否有有效简介
+            'label': torch.tensor(label, dtype=torch.float32)
         }
 
 
@@ -63,7 +80,7 @@ def create_des_expert_config(
     batch_size=32,
     learning_rate=2e-5,
     device='cuda',
-    checkpoint_dir='../autodl-tmp/checkpoints',
+    checkpoint_dir='../../autodl-tmp/checkpoints',
     bert_model_name='bert-base-uncased',
     freeze_bert=True
 ):
@@ -117,9 +134,9 @@ def create_des_expert_config(
 
     # 创建数据集和数据加载器
     print("创建数据加载器...")
-    train_dataset = DescriptionDataset(train_descriptions, train_labels, tokenizer)
-    val_dataset = DescriptionDataset(val_descriptions, val_labels, tokenizer)
-    test_dataset = DescriptionDataset(test_descriptions, test_labels, tokenizer)
+    train_dataset = DescriptionDataset(train_descriptions, train_labels, tokenizer, mode='train')
+    val_dataset = DescriptionDataset(val_descriptions, val_labels, tokenizer, mode='val')
+    test_dataset = DescriptionDataset(test_descriptions, test_labels, tokenizer, mode='test')
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -140,8 +157,7 @@ def create_des_expert_config(
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['label'].to(device).unsqueeze(1)
-        has_description = batch['has_description'].to(device)
-        return (input_ids, attention_mask), labels, has_description
+        return (input_ids, attention_mask), labels
 
     return {
         'name': 'des',
@@ -166,27 +182,22 @@ class TweetsDataset(Dataset):
             tweets_list: 推文列表
             labels: 标签列表
             mode: 'train' | 'val' | 'test'
-                  - train: 过滤掉没有推文的样本
-                  - val/test: 保留所有样本（但标记有效性）
+                  所有阶段都过滤掉没有推文的样本
         """
         self.mode = mode
-        self.labels = labels
 
-        if mode == 'train':
-            # 训练时：过滤掉没有推文的样本
-            valid_indices = []
-            for idx, user_tweets in enumerate(tweets_list):
-                cleaned = self._clean_tweets(user_tweets)
-                if len(cleaned) > 0:
-                    valid_indices.append(idx)
+        # 所有阶段都过滤掉没有推文的样本
+        valid_indices = []
+        for idx, user_tweets in enumerate(tweets_list):
+            cleaned = self._clean_tweets(user_tweets)
+            if len(cleaned) > 0:
+                valid_indices.append(idx)
 
-            self.tweets_list = [tweets_list[i] for i in valid_indices]
-            self.labels = [labels[i] for i in valid_indices]
-            print(f"  [训练集] 过滤前: {len(tweets_list)}, 过滤后: {len(self.tweets_list)} (移除 {len(tweets_list) - len(self.tweets_list)} 个无推文样本)")
-        else:
-            # 验证/测试时：保留所有样本
-            self.tweets_list = tweets_list
-            self.labels = labels
+        self.tweets_list = [tweets_list[i] for i in valid_indices]
+        self.labels = [labels[i] for i in valid_indices]
+
+        filtered_count = len(tweets_list) - len(self.tweets_list)
+        print(f"  [{mode}集] 有效样本: {len(self.tweets_list)}/{len(tweets_list)} (过滤 {filtered_count} 个无推文样本)")
 
     def _clean_tweets(self, user_tweets):
         """清理推文文本"""
@@ -205,31 +216,22 @@ class TweetsDataset(Dataset):
         user_tweets = self.tweets_list[idx]
         label = self.labels[idx]
 
-        # 清理推文文本
+        # 清理推文文本（保证非空）
         cleaned_tweets = self._clean_tweets(user_tweets)
-        has_tweets = len(cleaned_tweets) > 0
-
-        # 如果没有有效推文，使用特殊标记
-        if len(cleaned_tweets) == 0:
-            cleaned_tweets = ['[NO_TWEETS]']
 
         return {
             'tweets_text': cleaned_tweets,
-            'label': torch.tensor(label, dtype=torch.float32),
-            'has_tweets': has_tweets
+            'label': torch.tensor(label, dtype=torch.float32)
         }
 
-# 将一个 batch 中每个样本的推文文本列表、标签和 `has_tweets` 标记分别整理成列表和张量，打包成字典供模型输入
-# 返回值 - 1个字典，包含：3个key（'tweets_text_list', 'label', 'has_tweets'），通过隐含的索引i和df_data_labeled的数据一一对应
+# 将一个 batch 中每个样本的推文文本列表和标签整理成字典供模型输入
 def collate_tweets_fn(batch):
     tweets_text_lists = [item['tweets_text'] for item in batch]
     labels = torch.stack([item['label'] for item in batch])
-    has_tweets = torch.tensor([item['has_tweets'] for item in batch], dtype=torch.float32)
 
     return {
         'tweets_text_list': tweets_text_lists,
-        'label': labels,
-        'has_tweets': has_tweets  # 新增：标记每个用户是否有有效推文
+        'label': labels
     }
 
 def create_tweets_expert_config(
@@ -237,7 +239,7 @@ def create_tweets_expert_config(
     batch_size=32,
     learning_rate=1e-3,
     device='cuda',
-    checkpoint_dir='../autodl-tmp/checkpoints',
+    checkpoint_dir='../../autodl-tmp/checkpoints',
     roberta_model_name='distilroberta-base'
 ):
     """
@@ -311,8 +313,7 @@ def create_tweets_expert_config(
     def extract_fn(batch, device):
         tweets_text_list = batch['tweets_text_list']
         labels = batch['label'].to(device).unsqueeze(1)
-        has_tweets = batch['has_tweets'].to(device)
-        return (tweets_text_list,), labels, has_tweets
+        return (tweets_text_list,), labels
 
     return {
         'name': 'tweets',
