@@ -1,10 +1,10 @@
-### 所有expert
+
 python train_experts.py --expert all
 
-### 训练 Description Expert
+
 python train_experts.py --expert des
 
-### 训练 Tweets Expert
+
 python train_experts.py --expert tweets
 
 
