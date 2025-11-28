@@ -17,13 +17,13 @@ class Twibot20(Dataset):
         if process:
             # 读取原始数据
             print('加载 train.json')
-            df_train = pd.read_json('../autodl-tmp/Data/train.json') # ('./Data/train.json')
+            df_train = pd.read_json('../../autodl-tmp/Data/train.json') # ('./Data/train.json')
             print('加载 test.json')
-            df_test = pd.read_json('../autodl-tmp/Data/test.json')
+            df_test = pd.read_json('../../autodl-tmp/Data/test.json')
             print('加载 support.json')
-            df_support = pd.read_json('../autodl-fs/support.json')
+            df_support = pd.read_json('../../autodl-fs/support.json')
             print('加载 dev.json')
-            df_dev = pd.read_json('../autodl-tmp/Data/dev.json')
+            df_dev = pd.read_json('../../autodl-tmp/Data/dev.json')
             print('Finished')
 
             # 对原始数据集进行列筛选 - 只保留需要的列 , iloc是 pandas 中按位置索引选择数据的方法
@@ -46,6 +46,8 @@ class Twibot20(Dataset):
         if not os.path.exists(path):
             labels = torch.LongTensor(self.df_data_labeled['label'].values).to(self.device)
             if self.save:
+                # 确保目录存在
+                os.makedirs(self.root, exist_ok=True)
                 torch.save(labels, path)
         else:
             labels = torch.load(path).to(self.device)
@@ -66,6 +68,8 @@ class Twibot20(Dataset):
                     description.append(self.df_data_labeled['profile'][i]['description'])
             description = np.array(description)
             if self.save:
+                # 确保目录存在
+                os.makedirs(self.root, exist_ok=True)
                 np.save(path, description)
         else:
             description = np.load(path, allow_pickle=True) # allow_pickle=True 允许加载包含字符串等 Python 对象的数组
@@ -87,6 +91,8 @@ class Twibot20(Dataset):
                         one_user_tweets.append(each)
                 tweets.append(one_user_tweets)
             if self.save:
+                # 确保目录存在
+                os.makedirs(self.root, exist_ok=True)
                 # 保存变长列表为 object 数组，启用 allow_pickle
                 tweets_obj = np.array(tweets, dtype=object)
                 np.save(path, tweets_obj, allow_pickle=True)
@@ -135,6 +141,8 @@ class Twibot20(Dataset):
             edge_type = torch.tensor(edge_type, dtype=torch.long).to(self.device)
             
             if self.save:
+                # 确保目录存在
+                os.makedirs(self.root, exist_ok=True)
                 torch.save(edge_index, os.path.join(self.root, "edge_index.pt"))
                 torch.save(edge_type, os.path.join(self.root, "edge_type.pt"))
         else:

@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.dataset import Twibot20
 from src.model import DesExpert, TweetsExpert
 
+# 获取项目根目录
+PROJECT_ROOT = Path(__file__).parent.parent
+
 
 # ==================== Description Expert ====================
 
@@ -56,7 +59,7 @@ class DescriptionDataset(Dataset):
 
 
 def create_des_expert_config(
-    dataset_path='./processed_data',
+    dataset_path=None,
     batch_size=32,
     learning_rate=2e-5,
     device='cuda',
@@ -70,6 +73,9 @@ def create_des_expert_config(
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
     """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
     print(f"\n{'='*60}")
     print(f"配置 Description Expert")
     print(f"{'='*60}")
@@ -227,7 +233,7 @@ def collate_tweets_fn(batch):
     }
 
 def create_tweets_expert_config(
-    dataset_path='./processed_data',
+    dataset_path=None,
     batch_size=32,
     learning_rate=1e-3,
     device='cuda',
@@ -239,6 +245,9 @@ def create_tweets_expert_config(
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
     """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
     print(f"\n{'='*60}")
     print(f"配置 Tweets Expert")
     print(f"{'='*60}")
@@ -343,5 +352,12 @@ def get_expert_config(expert_name, **kwargs):
         raise ValueError(f"未知的专家名称: {expert_name}. 可用选项: {list(EXPERT_CONFIGS.keys())}")
 
     config_fn = EXPERT_CONFIGS[expert_name]
-    return config_fn(**kwargs)
+
+    # 过滤kwargs，只传递专家配置函数接受的参数
+    import inspect
+    sig = inspect.signature(config_fn)
+    valid_params = set(sig.parameters.keys())
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+
+    return config_fn(**filtered_kwargs)
 

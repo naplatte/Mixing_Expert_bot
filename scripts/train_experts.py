@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from scripts.expert_trainer import ExpertTrainer
+from expert_trainer import ExpertTrainer
 from configs.expert_configs import get_expert_config
 
 # 训练单个专家
@@ -94,7 +94,7 @@ def main():
     parser = argparse.ArgumentParser(description='训练社交机器人检测专家模型')
     parser.add_argument('--expert', type=str, default='all',
                         help='要训练的专家 (des, tweets, all)')
-    parser.add_argument('--dataset_path', type=str, default='./processed_data',
+    parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
     parser.add_argument('--checkpoint_dir', type=str, default='../autodl-tmp/checkpoints',
                         help='模型保存目录')
@@ -121,11 +121,14 @@ def main():
     else:
         device = args.device
 
+    # 解析数据集根目录，默认使用项目根目录下的 processed_data
+    dataset_path = args.dataset_path or str(project_root / 'processed_data')
+
     print(f"\n使用设备: {device}")
 
     # 基础配置参数
     base_config = {
-        'dataset_path': args.dataset_path,
+        'dataset_path': dataset_path,
         'batch_size': args.batch_size,
         'device': device,
         'checkpoint_dir': args.checkpoint_dir,
@@ -151,25 +154,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # 如果不使用命令行参数，可以直接调用
-    # main()
-
-    # 或者直接配置参数运行
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    config_params = {
-        'dataset_path': './processed_data',
-        'batch_size': 32,
-        'device': device,
-        'checkpoint_dir': '../autodl-tmp/checkpoints',
-        'bert_model_name': 'bert-base-uncased',
-        'roberta_model_name': 'distilroberta-base',
-        'freeze_bert': True,
-    }
-
-    # 训练所有专家
-    results = train_all_experts(config_params, num_epochs=10, experts=['des', 'tweets'])
-
-    # 或者只训练单个专家
-    # results = train_single_expert('des', config_params, num_epochs=10)
-
+    main()
