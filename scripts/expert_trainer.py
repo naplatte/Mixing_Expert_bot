@@ -284,10 +284,6 @@ class ExpertTrainer:
         print(f"  F1 Score: {test_metrics['f1']:.4f}")
         print(f"{'='*60}\n")
         
-        # 保存最终模型和历史记录
-        self.save_checkpoint('final', num_epochs, test_metrics)
-        self.save_history()
-        
         return self.history
     
     def save_checkpoint(self, name, epoch=None, extra_info=None):
@@ -316,11 +312,4 @@ class ExpertTrainer:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
-    def save_history(self):
-        """保存训练历史"""
-        path = self.checkpoint_dir / f"{self.name}_expert_history.json"
-        with open(path, 'w') as f:
-            json.dump(self.history, f, indent=2)
-        print(f"✓ 训练历史已保存到: {path}")
 

@@ -343,12 +343,6 @@ class GatingTrainer:
         print(f"  Test F1 Score:  {test_metrics['f1']:.4f}")
         print("="*60 + "\n")
 
-        # 保存最终模型
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'test_metrics': test_metrics
-        }, self.checkpoint_dir / 'gating_final.pt')
-        print(f"✓ 保存最终模型到: {self.checkpoint_dir / 'gating_final.pt'}\n")
 
 
 # ==================== 5. 主函数 ====================
