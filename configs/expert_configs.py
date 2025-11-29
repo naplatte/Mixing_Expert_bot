@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from transformers import BertTokenizer
 import numpy as np
 import sys
 from pathlib import Path
@@ -25,18 +24,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 class DescriptionDataset(Dataset):
     """Description 专家数据集"""
-    def __init__(self, descriptions, labels, tokenizer, max_length=128, mode='train'):
+    def __init__(self, descriptions, labels, mode='train'):
         """
         Args:
             descriptions: 简介列表
             labels: 标签列表
-            tokenizer: BERT tokenizer
-            max_length: 最大序列长度
             mode: 'train' | 'val' | 'test'
                   所有阶段都过滤掉空简介的样本
         """
-        self.tokenizer = tokenizer
-        self.max_length = max_length
         self.mode = mode
 
         # 所有阶段都过滤掉空简介的样本
@@ -59,18 +54,8 @@ class DescriptionDataset(Dataset):
         description = str(self.descriptions[idx])
         label = self.labels[idx]
 
-        # Tokenize（保证非空）
-        encoded = self.tokenizer(
-            description,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-
         return {
-            'input_ids': encoded['input_ids'].squeeze(0),
-            'attention_mask': encoded['attention_mask'].squeeze(0),
+            'description_text': description,
             'label': torch.tensor(label, dtype=torch.float32)
         }
 
@@ -81,8 +66,7 @@ def create_des_expert_config(
     learning_rate=2e-5,
     device='cuda',
     checkpoint_dir='../../autodl-tmp/checkpoints',
-    bert_model_name='bert-base-uncased',
-    freeze_bert=True
+    roberta_model_name='distilroberta-base'
 ):
     """
     创建 Description Expert 配置
@@ -128,15 +112,11 @@ def create_des_expert_config(
     print(f"  验证集: {len(val_descriptions)} 样本")
     print(f"  测试集: {len(test_descriptions)} 样本")
 
-    # 创建 tokenizer
-    print(f"初始化 tokenizer ({bert_model_name})...")
-    tokenizer = BertTokenizer.from_pretrained(bert_model_name)
-
     # 创建数据集和数据加载器
     print("创建数据加载器...")
-    train_dataset = DescriptionDataset(train_descriptions, train_labels, tokenizer, mode='train')
-    val_dataset = DescriptionDataset(val_descriptions, val_labels, tokenizer, mode='val')
-    test_dataset = DescriptionDataset(test_descriptions, test_labels, tokenizer, mode='test')
+    train_dataset = DescriptionDataset(train_descriptions, train_labels, mode='train')
+    val_dataset = DescriptionDataset(val_descriptions, val_labels, mode='val')
+    test_dataset = DescriptionDataset(test_descriptions, test_labels, mode='test')
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -144,7 +124,7 @@ def create_des_expert_config(
 
     # 初始化模型
     print("初始化模型...")
-    model = DesExpert(bert_model_name=bert_model_name, freeze_bert=freeze_bert).to(device)
+    model = DesExpert(roberta_model_name=roberta_model_name, device=device).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
@@ -154,10 +134,9 @@ def create_des_expert_config(
 
     # 数据提取函数
     def extract_fn(batch, device):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
+        description_texts = batch['description_text']
         labels = batch['label'].to(device).unsqueeze(1)
-        return (input_ids, attention_mask), labels
+        return (description_texts,), labels
 
     return {
         'name': 'des',
