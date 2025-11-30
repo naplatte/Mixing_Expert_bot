@@ -9,8 +9,12 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from pathlib import Path
 import sys
+import os
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 添加项目根目录到 Python 路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
 
 from src.dataset import Twibot20
 from src.metrics import update_binary_counts, compute_binary_f1
@@ -45,10 +49,11 @@ class GatingNetwork(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, expert_embeddings):
+    def forward(self, expert_embeddings, mask=None):
         """
         Args:
             expert_embeddings: List[Tensor(B,64)]
+            mask: Tensor(B, num_experts) bool, True表示该专家可用
         Returns:
             final_prob: (B,1)
             weights: (B,num_experts)
@@ -60,6 +65,15 @@ class GatingNetwork(nn.Module):
 
         # 计算注意力权重
         weights = self.attention(concat)  # (B, num_experts)
+
+        # 如果提供了 mask，只激活有效专家
+        if mask is not None:
+            mask = mask.to(weights.device)
+            # 对无效专家的权重设为 0
+            weights = weights * mask.float()
+            # 重新归一化（只对有效专家）
+            weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
+            weights = weights / weights_sum
 
         # 加权融合
         stacked = torch.stack(expert_embeddings, dim=1)  # (B, num_experts, 64)
@@ -73,16 +87,18 @@ class GatingNetwork(nn.Module):
 
 # ==================== 2. 数据集 ====================
 class GatingDataset(Dataset):
-    """门控网络数据集"""
+    """门控网络数据集（支持动态专家激活）"""
 
-    def __init__(self, expert_embeddings_dict, labels):
+    def __init__(self, expert_embeddings_dict, expert_masks_dict, labels):
         """
         Args:
             expert_embeddings_dict: {'des': Tensor(N,64), 'tweets': Tensor(N,64)}
+            expert_masks_dict: {'des': Tensor(N,) bool, 'tweets': Tensor(N,) bool}
             labels: Tensor(N,)
         """
         self.expert_names = sorted(expert_embeddings_dict.keys())
         self.embeddings = expert_embeddings_dict
+        self.masks = expert_masks_dict
         self.labels = labels
 
     def __len__(self):
@@ -91,80 +107,152 @@ class GatingDataset(Dataset):
     def __getitem__(self, idx):
         return {
             'embeddings': [self.embeddings[name][idx] for name in self.expert_names],
-            'label': self.labels[idx]
+            'mask': torch.tensor([self.masks[name][idx].item() for name in self.expert_names],
+                                dtype=torch.bool),  # [num_experts,] 哪些专家可用
+            'label': self.labels[idx].float()  # 转换为 float，BCELoss 需要
         }
 
 
 def collate_fn(batch):
-    """整理batch"""
+    """整理batch（包含 mask）"""
     num_experts = len(batch[0]['embeddings'])
     embeddings = [
         torch.stack([item['embeddings'][i] for item in batch])
         for i in range(num_experts)
     ]
+    masks = torch.stack([item['mask'] for item in batch])  # [B, num_experts]
     labels = torch.stack([item['label'] for item in batch])
-    return {'embeddings': embeddings, 'label': labels}
+    return {'embeddings': embeddings, 'mask': masks, 'label': labels}
 
 
-# ==================== 3. 提取专家特征 ====================
-def extract_expert_features(expert_name, split, dataset_path, checkpoint_dir, device):
+# ==================== 3. 提取专家特征（支持动态激活）====================
+def extract_expert_features_with_mask(expert_name, split_indices, dataset_path, checkpoint_dir, device):
     """
-    提取专家的64d嵌入
+    提取专家的64d嵌入，对于没有特征的样本用零向量填充，并返回可用性mask
 
     Args:
         expert_name: 'des' | 'tweets'
-        split: 'train' | 'val' | 'test'
+        split_indices: 样本索引列表
         dataset_path: 数据集路径
         checkpoint_dir: checkpoint目录
         device: 运行设备
 
     Returns:
-        embeddings: Tensor(N, 64)
+        embeddings: Tensor(N, 64) - 所有样本的嵌入（缺失特征用零填充）
+        mask: Tensor(N,) bool - True表示该样本有这个特征
     """
-    print(f"  提取 {expert_name} expert 的 {split} 集特征...")
+    print(f"  提取 {expert_name} expert 特征（支持动态激活）...")
 
-    # 加载专家配置
-    config = get_expert_config(
-        expert_name,
-        dataset_path=dataset_path,
-        device=device,
-        checkpoint_dir=checkpoint_dir
-    )
+    # 加载原始数据
+    from src.dataset import Twibot20
+    twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
 
-    model = config['model']
-    data_loader = config[f'{split}_loader']
-    extract_fn = config['extract_fn']
-
-    # 加载最佳模型
-    checkpoint_path = Path(checkpoint_dir) / f'{expert_name}_expert_best.pt'
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"    ✓ 已加载: {checkpoint_path}")
+    if expert_name == 'des':
+        raw_data = twibot_dataset.Des_preprocess()
+    elif expert_name == 'tweets':
+        raw_data = twibot_dataset.tweets_preprogress()
     else:
-        print(f"    ⚠ 未找到checkpoint: {checkpoint_path}")
-        print(f"    使用随机初始化的模型")
+        raise ValueError(f"Unknown expert: {expert_name}")
 
-    # 提取特征
-    model.eval()
-    embeddings_list = []
+    # 检查哪些样本有特征
+    mask = torch.zeros(len(split_indices), dtype=torch.bool)
+    valid_indices = []
 
-    with torch.no_grad():
-        for batch in tqdm(data_loader, desc=f"    提取{expert_name}特征", leave=False):
-            result = extract_fn(batch, device)
-            if len(result) == 3:
-                inputs, _, _ = result
-            else:
-                inputs, _ = result
+    for i, idx in enumerate(split_indices):
+        data = raw_data[idx]
+        has_feature = False
 
-            # 调用模型获取嵌入和概率
-            embedding, _ = model(*inputs)
-            embeddings_list.append(embedding.cpu())
+        if expert_name == 'des':
+            desc_str = str(data).strip()
+            has_feature = (desc_str != '' and desc_str.lower() != 'none')
+        elif expert_name == 'tweets':
+            if isinstance(data, list):
+                cleaned = [str(t).strip() for t in data if str(t).strip() not in ['', 'None']]
+                has_feature = len(cleaned) > 0
 
-    embeddings = torch.cat(embeddings_list, dim=0)
-    print(f"    特征形状: {embeddings.shape}")
+        if has_feature:
+            mask[i] = True
+            valid_indices.append(i)
 
-    return embeddings
+    print(f"    有效样本: {mask.sum().item()}/{len(split_indices)}")
+
+    # 初始化全零嵌入
+    embeddings = torch.zeros(len(split_indices), 64)
+
+    # 如果有有效样本，提取特征
+    if len(valid_indices) > 0:
+        config = get_expert_config(
+            expert_name,
+            dataset_path=dataset_path,
+            device=device,
+            checkpoint_dir=checkpoint_dir
+        )
+
+        model = config['model']
+        data_loader = config[f'train_loader']  # 仅用于获取 extract_fn
+        extract_fn = config['extract_fn']
+
+        # 加载最佳模型
+        checkpoint_path = Path(checkpoint_dir) / f'{expert_name}_expert_best.pt'
+        if checkpoint_path.exists():
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"    ✓ 已加载: {checkpoint_path}")
+
+        model.eval()
+
+        # 只对有效样本提取特征
+        with torch.no_grad():
+            # 构建临时数据集（只包含有效样本）
+            valid_data = [raw_data[split_indices[i]] for i in valid_indices]
+            labels_dummy = torch.zeros(len(valid_indices))
+
+            # 根据专家类型创建数据集
+            if expert_name == 'des':
+                from configs.expert_configs import DescriptionDataset
+                temp_dataset = DescriptionDataset(valid_data, labels_dummy.numpy(), mode='val')
+            elif expert_name == 'tweets':
+                from configs.expert_configs import TweetsDataset
+                temp_dataset = TweetsDataset(valid_data, labels_dummy.numpy(), mode='val')
+
+            # 为推文专家定义自定义 collate_fn（处理变长列表）
+            def custom_collate(batch):
+                if expert_name == 'tweets':
+                    # tweets_text_list 是变长列表，不能直接 stack
+                    return {
+                        'tweets_text_list': [item['tweets_text'] for item in batch],
+                        'label': torch.stack([item['label'] for item in batch])
+                    }
+                else:
+                    # des 专家使用默认处理
+                    return {
+                        'description_text': [item['description_text'] for item in batch],
+                        'label': torch.stack([item['label'] for item in batch])
+                    }
+
+            temp_loader = DataLoader(temp_dataset, batch_size=32, shuffle=False,
+                                    collate_fn=custom_collate)
+
+            embeddings_list = []
+            for batch in tqdm(temp_loader, desc=f"    提取{expert_name}特征", leave=False):
+                result = extract_fn(batch, device)
+                if len(result) == 3:
+                    inputs, _, _ = result
+                else:
+                    inputs, _ = result
+
+                embedding, _ = model(*inputs)
+                embeddings_list.append(embedding.cpu())
+
+            valid_embeddings = torch.cat(embeddings_list, dim=0)
+
+            # 将有效嵌入填充到对应位置
+            for i, valid_emb in zip(valid_indices, valid_embeddings):
+                embeddings[i] = valid_emb
+
+    print(f"    特征形状: {embeddings.shape}, Mask: {mask.sum().item()} valid")
+
+    return embeddings, mask
 
 
 # ==================== 4. 训练器 ====================
@@ -196,11 +284,12 @@ class GatingTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
         for batch in pbar:
             embeddings = [emb.to(self.device) for emb in batch['embeddings']]
+            masks = batch['mask'].to(self.device)  # [B, num_experts]
             labels = batch['label'].to(self.device).unsqueeze(1)
 
             self.optimizer.zero_grad()
 
-            final_prob, _ = self.model(embeddings)
+            final_prob, _ = self.model(embeddings, mask=masks)
             loss = self.criterion(final_prob, labels)
 
             loss.backward()
@@ -238,9 +327,10 @@ class GatingTrainer:
             pbar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]")
             for batch in pbar:
                 embeddings = [emb.to(self.device) for emb in batch['embeddings']]
+                masks = batch['mask'].to(self.device)  # [B, num_experts]
                 labels = batch['label'].to(self.device).unsqueeze(1)
 
-                final_prob, _ = self.model(embeddings)
+                final_prob, _ = self.model(embeddings, mask=masks)
                 loss = self.criterion(final_prob, labels)
 
                 total_loss += loss.item()
@@ -295,9 +385,10 @@ class GatingTrainer:
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Testing"):
                 embeddings = [emb.to(self.device) for emb in batch['embeddings']]
+                masks = batch['mask'].to(self.device)  # [B, num_experts]
                 labels = batch['label'].to(self.device).unsqueeze(1)
 
-                final_prob, _ = self.model(embeddings)
+                final_prob, _ = self.model(embeddings, mask=masks)
                 loss = self.criterion(final_prob, labels)
 
                 total_loss += loss.item()
@@ -378,33 +469,48 @@ def main():
 
     # ========== 提取专家特征 ==========
     print("\n" + "="*60)
-    print("提取专家特征")
+    print("提取专家特征（支持动态专家激活）")
     print("="*60)
 
     train_embeddings = {}
+    train_masks = {}
     val_embeddings = {}
+    val_masks = {}
     test_embeddings = {}
+    test_masks = {}
 
     for expert_name in expert_names:
         print(f"\n处理 {expert_name} expert:")
-        train_embeddings[expert_name] = extract_expert_features(
-            expert_name, 'train', dataset_path, checkpoint_dir, device
+
+        # 训练集
+        train_emb, train_mask = extract_expert_features_with_mask(
+            expert_name, train_idx, dataset_path, checkpoint_dir, device
         )
-        val_embeddings[expert_name] = extract_expert_features(
-            expert_name, 'val', dataset_path, checkpoint_dir, device
+        train_embeddings[expert_name] = train_emb
+        train_masks[expert_name] = train_mask
+
+        # 验证集
+        val_emb, val_mask = extract_expert_features_with_mask(
+            expert_name, val_idx, dataset_path, checkpoint_dir, device
         )
-        test_embeddings[expert_name] = extract_expert_features(
-            expert_name, 'test', dataset_path, checkpoint_dir, device
+        val_embeddings[expert_name] = val_emb
+        val_masks[expert_name] = val_mask
+
+        # 测试集
+        test_emb, test_mask = extract_expert_features_with_mask(
+            expert_name, test_idx, dataset_path, checkpoint_dir, device
         )
+        test_embeddings[expert_name] = test_emb
+        test_masks[expert_name] = test_mask
 
     # ========== 创建数据集 ==========
     print("\n" + "="*60)
     print("创建门控网络数据加载器")
     print("="*60)
 
-    train_dataset = GatingDataset(train_embeddings, labels[train_idx])
-    val_dataset = GatingDataset(val_embeddings, labels[val_idx])
-    test_dataset = GatingDataset(test_embeddings, labels[test_idx])
+    train_dataset = GatingDataset(train_embeddings, train_masks, labels[train_idx])
+    val_dataset = GatingDataset(val_embeddings, val_masks, labels[val_idx])
+    test_dataset = GatingDataset(test_embeddings, test_masks, labels[test_idx])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
                              shuffle=True, collate_fn=collate_fn)

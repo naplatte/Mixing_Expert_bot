@@ -62,14 +62,22 @@ class DescriptionDataset(Dataset):
 
 def create_des_expert_config(
     dataset_path=None,
-    batch_size=32,
-    learning_rate=2e-5,
+    batch_size=64,
+    learning_rate=5e-4,
+    weight_decay=0.01,
     device='cuda',
     checkpoint_dir='../../autodl-tmp/checkpoints',
-    roberta_model_name='distilroberta-base'
+    model_name='microsoft/deberta-v3-base',
+    max_grad_norm=1.0
 ):
     """
-    创建 Description Expert 配置
+    创建 Description Expert 配置 (优化版本，针对 DeBERTa-v3)
+
+    Args:
+        batch_size: 批次大小，默认64（相比32更大，因为只训练MLP）
+        learning_rate: 学习率，默认5e-4（相比2e-5更高，适合训练MLP）
+        weight_decay: 权重衰减，默认0.01，防止过拟合
+        max_grad_norm: 梯度裁剪阈值，默认1.0
 
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
@@ -78,8 +86,12 @@ def create_des_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Description Expert")
+    print(f"配置 Description Expert (DeBERTa-v3 优化版)")
     print(f"{'='*60}")
+    print(f"  批次大小: {batch_size}")
+    print(f"  学习率: {learning_rate}")
+    print(f"  权重衰减: {weight_decay}")
+    print(f"  梯度裁剪: {max_grad_norm}")
 
     # 加载数据
     print("加载数据...")
@@ -124,12 +136,18 @@ def create_des_expert_config(
 
     # 初始化模型
     print("初始化模型...")
-    model = DesExpert(roberta_model_name=roberta_model_name, device=device).to(device)
+    model = DesExpert(model_name=model_name, device=device, dropout=0.2).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-    # 优化器和损失函数
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
+    # 优化器和损失函数 - 使用权重衰减
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
     criterion = nn.BCELoss()
 
     # 数据提取函数
@@ -148,7 +166,10 @@ def create_des_expert_config(
         'criterion': criterion,
         'device': device,
         'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn
+        'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,  # 梯度裁剪
+        'batch_size': batch_size,
+        'learning_rate': learning_rate
     }
 
 

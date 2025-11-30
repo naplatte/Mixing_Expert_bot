@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, DebertaV2Tokenizer
 try:
     from torch_geometric.nn import RGCNConv
     _TORCH_GEOMETRIC_AVAILABLE = True
@@ -13,10 +13,10 @@ except ImportError as _tg_err:
 class DesExpert(nn.Module):
     """
     Description Expert Model
-    使用预训练 RoBERTa（冻结参数）提取特征 + MLP 处理用户简介信息
+    使用预训练 DeBERTa-v3（冻结参数）提取特征 + MLP 处理用户简介信息
     """
     def __init__(self,
-                 roberta_model_name='distilroberta-base',
+                 model_name='microsoft/deberta-v3-base',
                  hidden_dim=768,
                  expert_dim=64,
                  dropout=0.1,
@@ -27,34 +27,50 @@ class DesExpert(nn.Module):
         # 确定实际使用的设备
         self.device = device if device == 'cuda' and torch.cuda.is_available() else 'cpu'
 
-        # RoBERTa 模型和 Tokenizer (不微调，只用于特征提取)
-        self.roberta_tokenizer = AutoTokenizer.from_pretrained(roberta_model_name)
-        self.roberta_model = AutoModel.from_pretrained(roberta_model_name)
-        self.roberta_model.eval()  # 设置为评估模式
-        # 冻结 RoBERTa 参数，不进行微调
-        for param in self.roberta_model.parameters():
+        # DeBERTa-v3 模型和 Tokenizer (不微调，只用于特征提取)
+        # 显式使用慢速 DebertaV2 tokenizer，避免 HuggingFace 自动尝试 fast tokenizer -> tiktoken 转换
+        self.tokenizer = DebertaV2Tokenizer.from_pretrained(model_name, use_fast=False)
+        self.backbone_model = AutoModel.from_pretrained(model_name)
+
+        # 获取模型的实际 hidden size
+        actual_hidden_size = self.backbone_model.config.hidden_size
+
+        self.backbone_model.eval()  # 设置为评估模式
+        # 冻结 DeBERTa-v3 参数，不进行微调
+        for param in self.backbone_model.parameters():
             param.requires_grad = False
         # 移动到指定设备
-        self.roberta_model = self.roberta_model.to(self.device)
+        self.backbone_model = self.backbone_model.to(self.device)
 
-        self.hidden_dim = hidden_dim
-        
+        self.hidden_dim = actual_hidden_size
+
         # MLP 网络
-        # 从 RoBERTa 的 768维句向量到 64维 Expert Representation(768->256->128->64)
+        # 从 DeBERTa-v3 的句向量到 64维 Expert Representation
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
+            nn.Linear(actual_hidden_size, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(256, 128),
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(128, expert_dim)
         ).to(self.device)
 
-        # Bot Probability 预测头
-        # 从 64维 Expert Representation 到 1维 bot 概率（64->32->1)
+        # Bot Probability 预测头 - 增强版本
+        # 从 64维 Expert Representation 到 1维 bot 概率
         self.bot_classifier = nn.Sequential(
-            nn.Linear(expert_dim, 32),
+            nn.Linear(expert_dim, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1),
@@ -82,10 +98,10 @@ class DesExpert(nn.Module):
                 desc_str = ''  # 空简介
             cleaned_descriptions.append(desc_str)
 
-        # 使用 RoBERTa 提取特征（批量处理）
-        with torch.no_grad():  # 不计算梯度，因为不微调 RoBERTa
+        # 使用 DeBERTa-v3 提取特征（批量处理）
+        with torch.no_grad():  # 不计算梯度，因为不微调 DeBERTa-v3
             # Tokenize 所有简介
-            encoded = self.roberta_tokenizer(
+            encoded = self.tokenizer(
                 cleaned_descriptions,
                 max_length=128,
                 padding=True,
@@ -93,26 +109,26 @@ class DesExpert(nn.Module):
                 return_tensors='pt'
             )
 
-            # 移动到正确设备（使用 device 而不是 self.roberta_model.device）
+            # 移动到正确设备
             input_ids = encoded['input_ids'].to(device)
             attention_mask = encoded['attention_mask'].to(device)
 
-            # 使用 RoBERTa 提取特征
-            outputs = self.roberta_model(input_ids=input_ids, attention_mask=attention_mask)
-            hidden_states = outputs.last_hidden_state  # [batch_size, seq_len, 768]
+            # 使用 DeBERTa-v3 提取特征
+            outputs = self.backbone_model(input_ids=input_ids, attention_mask=attention_mask)
+            hidden_states = outputs.last_hidden_state  # [batch_size, seq_len, hidden_dim]
 
             # 对每个简介的所有词向量取平均，得到句向量
             # 使用 attention_mask 来正确计算平均值（忽略 padding）
             attention_mask_expanded = attention_mask.unsqueeze(-1).float()  # [batch_size, seq_len, 1]
-            masked_hidden = hidden_states * attention_mask_expanded  # [batch_size, seq_len, 768]
-            sum_hidden = masked_hidden.sum(dim=1)  # [batch_size, 768]
+            masked_hidden = hidden_states * attention_mask_expanded  # [batch_size, seq_len, hidden_dim]
+            sum_hidden = masked_hidden.sum(dim=1)  # [batch_size, hidden_dim]
             sum_mask = attention_mask_expanded.sum(dim=1)  # [batch_size, 1]
-            sentence_vectors = sum_hidden / sum_mask.clamp(min=1)  # [batch_size, 768]
+            sentence_vectors = sum_hidden / sum_mask.clamp(min=1)  # [batch_size, hidden_dim]
 
         # 确保 sentence_vectors 在正确的设备上（退出 no_grad 后显式检查）
         sentence_vectors = sentence_vectors.to(device)
 
-        # MLP: 768维 → 64维 Expert Representation
+        # MLP: hidden_dim → 64维 Expert Representation
         expert_repr = self.mlp(sentence_vectors)  # 专家表示，shape:[batch_size, 64]
 
         # Bot Probability 预测
@@ -364,4 +380,3 @@ class GraphExpert(nn.Module):
                 x = F.relu(x)
                 x = self.dropout(x)
         return x
-

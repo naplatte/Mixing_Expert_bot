@@ -20,8 +20,8 @@ class Twibot20(Dataset):
             df_train = pd.read_json('../../autodl-tmp/Data/train.json') # ('./Data/train.json')
             print('加载 test.json')
             df_test = pd.read_json('../../autodl-tmp/Data/test.json')
-            print('加载 support.json')
-            df_support = pd.read_json('../../autodl-fs/support.json')
+            # print('加载 support.json')
+            # df_support = pd.read_json('../../autodl-fs/support.json')
             print('加载 dev.json')
             df_dev = pd.read_json('../../autodl-tmp/Data/dev.json')
             print('Finished')
@@ -30,12 +30,12 @@ class Twibot20(Dataset):
             df_train = df_train.iloc[:,[0,1,2,3,5]] # 除domain之外的其余模块信息
             df_test = df_test.iloc[:,[0,1,2,3,5]]
             df_dev = df_dev.iloc[:,[0,1,2,3,5]]
-            df_support = df_support.iloc[:,[0,1,2,3]]
-            df_support['label'] = 'None' # 支持集没有标签信息
+            # df_support = df_support.iloc[:,[0,1,2,3]]
+            # df_support['label'] = 'None' # 支持集没有标签信息
 
             # 拼接数据集,拼接后重新生成连续的索引
             self.df_data_labeled = pd.concat([df_train,df_dev,df_test],ignore_index=True) # 整合带标签的数据集
-            self.df_data = pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
+            # self.df_data = pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
 
             self.save = save
 

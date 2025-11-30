@@ -42,6 +42,9 @@ class ExpertTrainer:
         # 数据提取函数(不同专家数据格式不同)
         self.extract_fn = expert_config.get('extract_fn', self._default_extract)
         
+        # 梯度裁剪
+        self.max_grad_norm = expert_config.get('max_grad_norm', None)
+
         self.best_val_loss = float('inf')
         self.history = {'train': [], 'val': [], 'test': {}}
     
@@ -78,6 +81,11 @@ class ExpertTrainer:
             # 计算损失
             loss = self.criterion(bot_prob, labels)
             loss.backward()
+
+            # 梯度裁剪（如果配置中提供）
+            if hasattr(self, 'max_grad_norm') and self.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
             self.optimizer.step()
             
             # 统计指标
