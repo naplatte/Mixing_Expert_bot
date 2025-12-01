@@ -23,21 +23,19 @@ from configs.expert_configs import get_expert_config
 
 # ==================== 1. 模型定义 ====================
 class GatingNetwork(nn.Module):
-    """门控网络: 融合多个专家"""
+    """门控网络: 融合多个专家（先筛选有效专家，再计算权重）"""
 
     def __init__(self, num_experts=2, expert_dim=64, hidden_dim=128, dropout=0.3):
         super().__init__()
         self.num_experts = num_experts
         self.expert_dim = expert_dim
 
-        # 注意力机制计算权重
-        input_dim = num_experts * expert_dim
-        self.attention = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+        # 对每个专家打分（分数归一化后就是权重）
+        self.expert_scorer = nn.Sequential(
+            nn.Linear(expert_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_experts),
-            nn.Softmax(dim=-1)
+            nn.Linear(hidden_dim, 1)  # 输出单个 logit
         )
 
         # 分类器
@@ -52,32 +50,59 @@ class GatingNetwork(nn.Module):
     def forward(self, expert_embeddings, mask=None):
         """
         Args:
-            expert_embeddings: List[Tensor(B,64)]
+            expert_embeddings: List[Tensor(B,64)] B表示batch size大小
             mask: Tensor(B, num_experts) bool, True表示该专家可用
         Returns:
-            final_prob: (B,1)
-            weights: (B,num_experts)
+            final_prob: (B,1) batch size中每个样本的最终预测概率
+            weights: (B,num_experts) 每个专家的权重
         """
         batch_size = expert_embeddings[0].size(0)
+        device = expert_embeddings[0].device
 
-        # 拼接所有专家嵌入
-        concat = torch.cat(expert_embeddings, dim=1)  # (B, num_experts*64)
-
-        # 计算注意力权重
-        weights = self.attention(concat)  # (B, num_experts)
-
-        # 如果提供了 mask，只激活有效专家
-        if mask is not None:
-            mask = mask.to(weights.device)
-            # 对无效专家的权重设为 0
-            weights = weights * mask.float()
-            # 重新归一化（只对有效专家）
-            weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
-            weights = weights / weights_sum
-
-        # 加权融合
+        # 堆叠所有专家嵌入（样本某数据为空则对应专家表示用零向量填充）
         stacked = torch.stack(expert_embeddings, dim=1)  # (B, num_experts, 64)
-        fused = torch.sum(stacked * weights.unsqueeze(-1), dim=1)  # (B, 64)
+
+        if mask is None:
+            # 如果没有 mask，所有专家都可用
+            mask = torch.ones(batch_size, self.num_experts, dtype=torch.bool, device=device)
+        else:
+            mask = mask.to(device)
+
+        # 初始化输出
+        fused_list = []
+        weights_list = []
+
+        # 对每个样本单独处理（只使用其有效专家）
+        for i in range(batch_size):
+            sample_mask = mask[i]  # (num_experts,)
+            valid_indices = torch.where(sample_mask)[0]  # 有效专家的索引
+
+            if len(valid_indices) == 0:
+                # 如果没有有效专家，使用零向量和均匀权重
+                fused_list.append(torch.zeros(self.expert_dim, device=device))
+                weights_list.append(torch.zeros(self.num_experts, device=device))
+            else:
+                # 只提取有效专家的嵌入
+                valid_embeddings = stacked[i, valid_indices]  # (num_valid, 64)
+
+                # 对有效专家打分
+                logits = self.expert_scorer(valid_embeddings).squeeze(-1)  # (num_valid,)
+
+                # Softmax 归一化（只在有效专家间）
+                valid_weights = torch.softmax(logits, dim=0)  # (num_valid,)
+
+                # 加权融合有效专家
+                fused = torch.sum(valid_embeddings * valid_weights.unsqueeze(-1), dim=0)  # (64,)
+                fused_list.append(fused)
+
+                # 构建完整的权重向量（无效专家权重为0）
+                full_weights = torch.zeros(self.num_experts, device=device)
+                full_weights[valid_indices] = valid_weights
+                weights_list.append(full_weights)
+
+        # 合并batch
+        fused = torch.stack(fused_list, dim=0)  # (B, 64)
+        weights = torch.stack(weights_list, dim=0)  # (B, num_experts)
 
         # 最终分类
         final_prob = self.classifier(fused)  # (B, 1)
@@ -444,7 +469,7 @@ def main():
     checkpoint_dir = '../../autodl-tmp/checkpoints'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 64
-    num_epochs = 50
+    num_epochs = 20
     learning_rate = 1e-4
 
     print(f"\n{'='*60}")
