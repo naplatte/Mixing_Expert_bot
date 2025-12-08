@@ -295,36 +295,152 @@ class Twibot20(Dataset):
         print(f'tweets_embedding 完成. Shape: {tweets_tensor.shape}')
         return tweets_tensor
 
-    metadata - num类
-    def num_preprocess(self):
-        print('加载数值型属性信息...', end=' ')
-        path = os.path.join('./pt_data', 'num_prop.pt')
-        if not os.path.exists(path):
-            path = self.root
-            # 粉丝数
-            if not os.path.exits(path + "followers_count.pt"):
+    def num_prop_preprocess(self):
+        print('开始处理数值类metadata', end='   ')
+        path0 = os.path.join('./pt_data', 'num_properties_tensor.pt')
+        if not os.path.exists(path0):
+            if not os.path.exists(os.path.join('./pt_data', "followers_count.pt")):
                 followers_count = []
-                for i in range (self.df_data_labeled.shape[0]):
-                    if self.df_data_labeled['profile'][i] is None or self.df_data['profile'][i]['followers_count'] is None:
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['followers_count'] is None:
                         followers_count.append(0)
                     else:
-                        followers_count.append(self.df_data_labeled['profile'][i]['followers_count'])
-                followers_count=torch.tensor(np.array(followers_count,dtype=np.float32)).to(self.device)
+                        followers_count.append(self.df_data['profile'][i]['followers_count'])
+                followers_count = torch.tensor(np.array(followers_count, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(followers_count,path+"followers_count.pt")
+                    os.makedirs('./pt_data', exist_ok=True)
+                    torch.save(followers_count, os.path.join('./pt_data', "followers_count.pt"))
 
-            # 关注数
-            friend_count = []
-            for i in range(self.df_data.shape[0]):
-                if self.df_data['profile'][i] is None or self.df_data['profile'][i]['friends_count'] is None:
-                    friends_count.append(0)
-                else:
-                    friends_count.append(self.df_data['profile'][i]['friends_count'])
-            friends_count = torch.tensor(np.array(friends_count, dtype=np.float32)).to(self.device)
+                friends_count = []
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['friends_count'] is None:
+                        friends_count.append(0)
+                    else:
+                        friends_count.append(self.df_data['profile'][i]['friends_count'])
+                friends_count = torch.tensor(np.array(friends_count, dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(friends_count, os.path.join('./pt_data', 'friends_count.pt'))
+
+                screen_name_length = []
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['screen_name'] is None:
+                        screen_name_length.append(0)
+                    else:
+                        screen_name_length.append(len(self.df_data['profile'][i]['screen_name']))
+                screen_name_length = torch.tensor(np.array(screen_name_length, dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(screen_name_length, os.path.join('./pt_data', 'screen_name_length.pt'))
+
+                favourites_count = []
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['favourites_count'] is None:
+                        favourites_count.append(0)
+                    else:
+                        favourites_count.append(self.df_data['profile'][i]['favourites_count'])
+                favourites_count = torch.tensor(np.array(favourites_count, dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(favourites_count, os.path.join('./pt_data', 'favourites_count.pt'))
+
+                active_days = []
+                date0 = dt.strptime('Tue Sep 1 00:00:00 +0000 2020 ', '%a %b %d %X %z %Y ')
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['created_at'] is None:
+                        active_days.append(0)
+                    else:
+                        date = dt.strptime(self.df_data['profile'][i]['created_at'], '%a %b %d %X %z %Y ')
+                        active_days.append((date0 - date).days)
+                active_days = torch.tensor(np.array(active_days, dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(active_days, os.path.join('./pt_data', 'active_days.pt'))
+
+                statuses_count = []
+                for i in range(self.df_data.shape[0]):
+                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['statuses_count'] is None:
+                        statuses_count.append(0)
+                    else:
+                        statuses_count.append(int(self.df_data['profile'][i]['statuses_count']))
+                statuses_count = torch.tensor(np.array(statuses_count, dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(statuses_count, os.path.join('./pt_data', 'statuses_count.pt'))
+
+            else:
+                active_days = torch.load(os.path.join('./pt_data', "active_days.pt"))
+                screen_name_length = torch.load(os.path.join('./pt_data', "screen_name_length.pt"))
+                favourites_count = torch.load(os.path.join('./pt_data', "favourites_count.pt"))
+                followers_count = torch.load(os.path.join('./pt_data', "followers_count.pt"))
+                friends_count = torch.load(os.path.join('./pt_data', "friends_count.pt"))
+                statuses_count = torch.load(os.path.join('./pt_data', "statuses_count.pt"))
+
+            active_days = pd.Series(active_days.to('cpu').detach().numpy())
+            active_days = (active_days - active_days.mean()) / active_days.std()
+            active_days = torch.tensor(np.array(active_days))
+
+            screen_name_length = pd.Series(screen_name_length.to('cpu').detach().numpy())
+            screen_name_length_days = (screen_name_length - screen_name_length.mean()) / screen_name_length.std()
+            screen_name_length_days = torch.tensor(np.array(screen_name_length_days))
+
+            favourites_count = pd.Series(favourites_count.to('cpu').detach().numpy())
+            favourites_count = (favourites_count - favourites_count.mean()) / favourites_count.std()
+            favourites_count = torch.tensor(np.array(favourites_count))
+
+            followers_count = pd.Series(followers_count.to('cpu').detach().numpy())
+            followers_count = (followers_count - followers_count.mean()) / followers_count.std()
+            followers_count = torch.tensor(np.array(followers_count))
+
+            friends_count = pd.Series(friends_count.to('cpu').detach().numpy())
+            friends_count = (friends_count - friends_count.mean()) / friends_count.std()
+            friends_count = torch.tensor(np.array(friends_count))
+
+            statuses_count = pd.Series(statuses_count.to('cpu').detach().numpy())
+            statuses_count = (statuses_count - statuses_count.mean()) / statuses_count.std()
+            statuses_count = torch.tensor(np.array(statuses_count))
+
+            num_prop = torch.cat((followers_count.reshape([229580, 1]), friends_count.reshape([229580, 1]),
+                                  favourites_count.reshape([229580, 1]), statuses_count.reshape([229580, 1]),
+                                  screen_name_length_days.reshape([229580, 1]), active_days.reshape([229580, 1])),
+                                 1).to(self.device)
+
             if self.save:
-                torch.save(friends_count, path + 'friends_count.pt')
+                os.makedirs('./pt_data', exist_ok=True)
+                torch.save(num_prop, os.path.join('./pt_data', "num_properties_tensor.pt"))
 
+        else:
+            num_prop = torch.load(os.path.join('./pt_data', "num_properties_tensor.pt")).to(self.device)
+        print('Finished')
+        return num_prop
 
+    def cat_prop_preprocess(self):
+        print('开始处理类别类metadata', end='   ')
+        path = os.path.join('./pt_data', 'cat_properties_tensor.pt')
+        if not os.path.exists(path):
+            category_properties = []
+            properties = ['protected', 'geo_enabled', 'verified', 'contributors_enabled', 'is_translator',
+                          'is_translation_enabled', 'profile_background_tile', 'profile_use_background_image',
+                          'has_extended_profile', 'default_profile', 'default_profile_image']
+            for i in range(self.df_data.shape[0]):
+                prop = []
+                if self.df_data['profile'][i] is None:
+                    for i in range(11):
+                        prop.append(0)
+                else:
+                    for each in properties:
+                        if self.df_data['profile'][i][each] is None:
+                            prop.append(0)
+                        else:
+                            if self.df_data['profile'][i][each] == "True ":
+                                prop.append(1)
+                            else:
+                                prop.append(0)
+                prop = np.array(prop)
+                category_properties.append(prop)
+            category_properties = torch.tensor(np.array(category_properties, dtype=np.float32)).to(self.device)
+            if self.save:
+                os.makedirs('./pt_data', exist_ok=True)
+                torch.save(category_properties, os.path.join('./pt_data', 'cat_properties_tensor.pt'))
+        else:
+            category_properties = torch.load(os.path.join('./pt_data', "cat_properties_tensor.pt")).to(self.device)
+        print('Finished')
+        return category_properties
 
     # 构建异质图
     def build_graph(self):
