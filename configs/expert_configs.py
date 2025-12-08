@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import Twibot20
-from src.model import DesExpert, TweetsExpert
+from src.model import DesExpert, TweetsExpert, GraphExpert
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -66,9 +66,10 @@ def create_des_expert_config(
     learning_rate=5e-4,
     weight_decay=0.01,
     device='cuda',
-    checkpoint_dir='../../autodl-tmp/checkpoints',
+    checkpoint_dir='../../autodl-fs/checkpoints',
     model_name='microsoft/deberta-v3-base',
-    max_grad_norm=1.0
+    max_grad_norm=1.0,
+    twibot_dataset=None
 ):
     """
     创建 Description Expert 配置 (优化版本，针对 DeBERTa-v3)
@@ -78,6 +79,7 @@ def create_des_expert_config(
         learning_rate: 学习率，默认5e-4（相比2e-5更高，适合训练MLP）
         weight_decay: 权重衰减，默认0.01，防止过拟合
         max_grad_norm: 梯度裁剪阈值，默认1.0
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
 
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
@@ -93,9 +95,12 @@ def create_des_expert_config(
     print(f"  权重衰减: {weight_decay}")
     print(f"  梯度裁剪: {max_grad_norm}")
 
-    # 加载数据
-    print("加载数据...")
-    twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("加载数据...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("使用预加载的数据集...")
 
     descriptions = twibot_dataset.Des_preprocess()
     labels = twibot_dataset.load_labels()
@@ -239,11 +244,16 @@ def create_tweets_expert_config(
     batch_size=32,
     learning_rate=1e-3,
     device='cuda',
-    checkpoint_dir='../../autodl-tmp/checkpoints',
-    roberta_model_name='distilroberta-base'
+    checkpoint_dir='../../autodl-fs/checkpoints',
+    roberta_model_name='distilroberta-base',
+    twibot_dataset=None
 ):
     """
     创建 Tweets Expert 配置
+
+    Args:
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
     """
@@ -254,9 +264,12 @@ def create_tweets_expert_config(
     print(f"配置 Tweets Expert")
     print(f"{'='*60}")
 
-    # 加载数据
-    print("加载数据...")
-    twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("加载数据...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("使用预加载的数据集...")
 
     tweets_list = twibot_dataset.tweets_preprogress()
     labels = twibot_dataset.load_labels()
@@ -329,14 +342,248 @@ def create_tweets_expert_config(
     }
 
 
+# ==================== Graph Expert ====================
+
+class GraphDataset(Dataset):
+    """Graph Expert 数据集"""
+    def __init__(self, node_indices, labels):
+        """
+        Args:
+            node_indices: 节点索引列表
+            labels: 标签列表
+        """
+        self.node_indices = node_indices
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.node_indices)
+
+    def __getitem__(self, idx):
+        return {
+            'node_index': torch.tensor(self.node_indices[idx], dtype=torch.long),
+            'label': torch.tensor(self.labels[idx], dtype=torch.float32)
+        }
+
+
+def collate_graph_fn(batch):
+    """图数据 collate 函数"""
+    node_indices = torch.stack([item['node_index'] for item in batch])
+    labels = torch.stack([item['label'] for item in batch])
+
+    return {
+        'node_indices': node_indices,
+        'label': labels
+    }
+
+
+def create_graph_expert_config(
+    dataset_path=None,
+    batch_size=128,
+    learning_rate=1e-3,
+    weight_decay=1e-4,
+    device='cuda',
+    checkpoint_dir='../../autodl-fs/checkpoints',
+    hidden_dim=128,
+    expert_dim=64,
+    num_layers=2,
+    dropout=0.3,
+    expert_names=['des', 'tweets'],  # 用于聚合节点特征的专家列表
+    twibot_dataset=None
+):
+    """
+    创建 Graph Expert 配置
+
+    节点特征从其他专家的表示聚合而来，使用 RGCN 进行图卷积
+
+    Args:
+        expert_names: 用于聚合节点特征的专家列表（必须已训练好）
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+
+    Returns:
+        dict: 包含模型、数据加载器、优化器等的配置字典
+    """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
+    print(f"\n{'='*60}")
+    print(f"配置 Graph Expert (RGCN)")
+    print(f"{'='*60}")
+    print(f"  批次大小: {batch_size}")
+    print(f"  学习率: {learning_rate}")
+    print(f"  使用专家: {expert_names}")
+
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("\n加载数据集和图结构...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("\n使用预加载的数据集和图结构...")
+
+    labels = twibot_dataset.load_labels()
+    labels = labels.cpu().numpy()
+
+    # 构建图结构
+    edge_index, edge_type = twibot_dataset.build_graph()
+    print(f"  图边数: {edge_index.shape[1]}")
+    print(f"  边类型数: {len(torch.unique(edge_type))}")
+
+    # 获取训练/验证/测试集索引
+    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
+    train_idx = list(train_idx)
+    val_idx = list(val_idx)
+    test_idx = list(test_idx)
+
+    print(f"  训练集: {len(train_idx)} 节点")
+    print(f"  验证集: {len(val_idx)} 节点")
+    print(f"  测试集: {len(test_idx)} 节点")
+
+    # ========== 聚合节点特征：从其他专家提取表示 ==========
+    print(f"\n{'='*60}")
+    print(f"从其他专家聚合节点特征")
+    print(f"{'='*60}")
+
+    from tqdm import tqdm
+
+    # 注意：需要对全部节点（包括支持集）提取特征
+    # df_data 包含所有节点（train + val + test + support）
+    num_all_nodes = len(twibot_dataset.df_data)
+    print(f"  总节点数（含支持集）: {num_all_nodes}")
+
+    all_node_indices = list(range(num_all_nodes)) # 所有节点索引
+
+    # 定义缓存文件路径
+    cache_dir = Path(dataset_path) / 'graph_expert_cache'
+    cache_dir.mkdir(exist_ok=True)
+
+    # 生成缓存文件名（包含专家列表信息）
+    expert_names_str = '_'.join(sorted(expert_names))
+    aggregated_features_cache = cache_dir / f'aggregated_node_features_{expert_names_str}.pt'
+
+    # 检查是否存在缓存文件
+    if aggregated_features_cache.exists():
+        print(f"\n  ✓ 发现缓存的聚合特征，直接加载...")
+        print(f"    缓存路径: {aggregated_features_cache}")
+        initial_node_features = torch.load(aggregated_features_cache, map_location='cpu')
+        print(f"  ✓ 加载完成，节点特征形状: {initial_node_features.shape}")
+    else:
+        print(f"\n  未找到缓存，开始提取专家特征...")
+
+        # 存储所有节点的专家表示
+        all_expert_embeddings = []  # List of [num_all_nodes, 64]
+
+        for expert_name in expert_names:
+            # 检查单个专家的缓存
+            expert_cache_file = cache_dir / f'{expert_name}_node_features.pt'
+
+            if expert_cache_file.exists():
+                print(f"\n  ✓ 加载 {expert_name} 专家的缓存特征...")
+                print(f"    缓存路径: {expert_cache_file}")
+                cached_data = torch.load(expert_cache_file, map_location='cpu')
+                embeddings = cached_data['embeddings']
+                mask = cached_data['mask']
+                print(f"    有效样本: {mask.sum().item()}/{len(mask)}")
+            else:
+                print(f"\n  提取 {expert_name} 专家特征...")
+
+                # 提取该专家对所有节点的表示（包括支持集）
+                # 复用已加载的 twibot_dataset，避免重复加载
+                from scripts.gating_network import extract_expert_features_with_mask
+
+                embeddings, mask = extract_expert_features_with_mask(
+                    expert_name, all_node_indices, dataset_path, checkpoint_dir, device,
+                    twibot_dataset=twibot_dataset  # 传入已加载的数据集，避免重复加载
+                )
+
+                # 保存单个专家的特征到缓存
+                print(f"    保存 {expert_name} 特征到缓存...")
+                torch.save({
+                    'embeddings': embeddings.cpu(),
+                    'mask': mask.cpu()
+                }, expert_cache_file)
+                print(f"    ✓ 已保存到: {expert_cache_file}")
+
+            all_expert_embeddings.append(embeddings)  # [num_all_nodes, 64]
+
+        # 聚合所有专家的表示：简单拼接后通过线性层
+        print(f"\n  聚合 {len(expert_names)} 个专家的特征...")
+        stacked_embeddings = torch.stack(all_expert_embeddings, dim=1)  # [num_all_nodes, num_experts, 64]
+
+        # 方式1：平均池化
+        initial_node_features = torch.mean(stacked_embeddings, dim=1)  # [num_all_nodes, 64]
+
+        # 方式2：拼接（如果想用这个，需要修改 input_dim）
+        # initial_node_features = stacked_embeddings.view(num_all_nodes, -1)  # [num_all_nodes, num_experts*64]
+
+        print(f"  初始节点特征形状: {initial_node_features.shape}")
+
+        # 保存聚合后的特征
+        print(f"\n  保存聚合特征到缓存...")
+        torch.save(initial_node_features.cpu(), aggregated_features_cache)
+        print(f"  ✓ 已保存到: {aggregated_features_cache}")
+
+    # 创建数据集和数据加载器（只用带标签的节点）
+    print("\n创建数据加载器...")
+    train_labels = labels[train_idx]
+    val_labels = labels[val_idx]
+    test_labels = labels[test_idx]
+
+    train_dataset = GraphDataset(train_idx, train_labels)
+    val_dataset = GraphDataset(val_idx, val_labels)
+    test_dataset = GraphDataset(test_idx, test_labels)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_graph_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
+
+    # 初始化模型
+    print("\n初始化 Graph Expert 模型...")
+    model = GraphExpert(
+        num_nodes=num_all_nodes,
+        initial_node_features=initial_node_features,
+        num_relations=2,  # following (0) 和 follower (1)
+        hidden_dim=hidden_dim,
+        expert_dim=expert_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+        device=device
+    ).to(device)
+
+    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
+    # 优化器和损失函数
+    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    criterion = nn.BCELoss()
+
+    # 数据提取函数
+    def extract_fn(batch, device):
+        node_indices = batch['node_indices'].to(device)
+        labels = batch['label'].to(device).unsqueeze(1)
+        # 图结构是全局的，不随 batch 变化
+        return (node_indices, edge_index, edge_type), labels
+
+    return {
+        'name': 'graph',
+        'model': model,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'optimizer': optimizer,
+        'criterion': criterion,
+        'device': device,
+        'checkpoint_dir': checkpoint_dir,
+        'extract_fn': extract_fn,
+        'edge_index': edge_index,  # 保存图结构供后续使用
+        'edge_type': edge_type
+    }
+
+
 # ==================== 配置注册表 ====================
 
 EXPERT_CONFIGS = {
     'des': create_des_expert_config,
     'tweets': create_tweets_expert_config,
-    # 后续可以添加更多专家配置
-    # 'graph': create_graph_expert_config,
-    # 'metadata': create_metadata_expert_config,
+    'graph': create_graph_expert_config,
 }
 
 # 获取专家配置

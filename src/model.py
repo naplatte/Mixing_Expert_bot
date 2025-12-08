@@ -275,108 +275,108 @@ class TweetsExpert(nn.Module):
         return expert_repr
 
 
-# 图结构专家模型
+# 图专家模型
 class GraphExpert(nn.Module):
-    # 输入: 图结构 (edge_index, edge_type) 和节点特征
+    """
+    Graph Expert Model
+    使用 RGCN 处理异构图结构，节点特征由其他专家的表示聚合而来
+    """
     def __init__(self,
                  num_nodes,
-                 node_features,
+                 initial_node_features,  # 从其他专家聚合得到的初始节点特征 [num_nodes, feature_dim]
                  num_relations=2,  # following (0) 和 follower (1) 两种关系
                  hidden_dim=128,
                  expert_dim=64,
                  num_layers=2,
-                 dropout=0.1,
+                 dropout=0.3,
                  device='cuda'):
         super(GraphExpert, self).__init__()
-        
+
         if not _TORCH_GEOMETRIC_AVAILABLE:
-            raise ImportError("需要安装 torch_geometric 才能使用 GraphExpert。安装方法: pip install torch-geometric")
-        
+            raise ImportError("需要安装 torch_geometric 才能使用 GraphExpert。\n"
+                            "安装方法: pip install torch-geometric torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-{torch_version}+{cuda_version}.html")
+
         self.num_nodes = num_nodes
         self.num_relations = num_relations
         self.hidden_dim = hidden_dim
         self.expert_dim = expert_dim
-        self.device = device
-        
-        # 节点结构特征（预先计算），注册为 buffer，随模型保存/加载
-        node_features = node_features.to(device if device == 'cuda' and torch.cuda.is_available() else 'cpu')
-        self.register_buffer('node_features', node_features)
-        
+        self.num_layers = num_layers
+        self.device = device if device == 'cuda' and torch.cuda.is_available() else 'cpu'
+
+        # 节点初始特征（从其他专家聚合得到），注册为 buffer，随模型保存/加载
+        initial_node_features = initial_node_features.to(self.device)
+        self.register_buffer('initial_node_features', initial_node_features)
+
+        input_dim = initial_node_features.shape[1]
+
         # RGCN 层
         self.rgcn_layers = nn.ModuleList()
-        input_dim = node_features.shape[1]
-        # 第一层: input_dim -> hidden_dim
-        self.rgcn_layers.append(
-            RGCNConv(input_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
-        )
-        # 中间层: hidden_dim -> hidden_dim
-        for _ in range(num_layers - 2):
+
+        if num_layers == 1:
+            # 如果只有一层，直接从输入维度 -> expert_dim
             self.rgcn_layers.append(
-                RGCNConv(hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+                RGCNConv(input_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
             )
-        # 最后一层: hidden_dim -> expert_dim
-        if num_layers > 1:
+        else:
+            # 第一层: input_dim -> hidden_dim
+            self.rgcn_layers.append(
+                RGCNConv(input_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+            )
+            # 中间层: hidden_dim -> hidden_dim
+            for _ in range(num_layers - 2):
+                self.rgcn_layers.append(
+                    RGCNConv(hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_relations)
+                )
+            # 最后一层: hidden_dim -> expert_dim
             self.rgcn_layers.append(
                 RGCNConv(hidden_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
             )
-        else:
-            # 如果只有一层，直接从输入维度 -> expert_dim
-            self.rgcn_layers[0] = RGCNConv(input_dim, expert_dim, num_relations=num_relations, num_bases=num_relations)
-        
+
         self.dropout = nn.Dropout(dropout)
-        
-        # Bot Probability 预测头
+
+        # Bot Probability 预测头（与其他专家保持一致）
         self.bot_classifier = nn.Sequential(
-            nn.Linear(expert_dim, 32),
+            nn.Linear(expert_dim, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
-    
+
     def forward(self, node_indices, edge_index, edge_type):
         """
         Args:
             node_indices: [batch_size] - 当前 batch 中节点的索引（在完整图中的索引）
             edge_index: [2, num_edges] - 图的边索引
             edge_type: [num_edges] - 每条边的类型（0: following, 1: follower）
-        
+
         Returns:
-            expert_repr: [batch_size, expert_dim] - 专家表示
+            expert_repr: [batch_size, expert_dim] - 专家表示（64维）
             bot_prob: [batch_size, 1] - bot 概率
         """
-        # 通过 RGCN 层进行图卷积
-        x = self.node_features
+        # 通过 RGCN 层进行图卷积（全图传播，提取所有节点的表示）
+        x = self.initial_node_features
+
         for i, rgcn_layer in enumerate(self.rgcn_layers):
             x = rgcn_layer(x, edge_index, edge_type)
             if i < len(self.rgcn_layers) - 1:  # 最后一层不加激活和dropout
                 x = F.relu(x)
                 x = self.dropout(x)
-        
+
         # 提取当前 batch 中节点的表示 [batch_size, expert_dim]
-        batch_node_features = x[node_indices]
-        
+        batch_expert_repr = x[node_indices]
+
         # Bot Probability 预测
-        bot_prob = self.bot_classifier(batch_node_features)  # [batch_size, 1]
-        
-        return batch_node_features, bot_prob
-    
+        bot_prob = self.bot_classifier(batch_expert_repr)  # [batch_size, 1]
+
+        return batch_expert_repr, bot_prob
+
     def get_expert_repr(self, node_indices, edge_index, edge_type):
-        """只获取专家表示，不计算 bot 概率"""
+        """只获取专家表示，不计算 bot 概率（用于 gating network）"""
         expert_repr, _ = self.forward(node_indices, edge_index, edge_type)
         return expert_repr
-    
-    def get_all_node_repr(self, edge_index, edge_type):
-        """
-        获取所有节点的专家表示（用于图嵌入）
-        Returns:
-            all_repr: [num_nodes, expert_dim]
-        """
-        all_node_features = self.node_embedding(torch.arange(self.num_nodes, device=self.device))
-        x = all_node_features
-        for i, rgcn_layer in enumerate(self.rgcn_layers):
-            x = rgcn_layer(x, edge_index, edge_type)
-            if i < len(self.rgcn_layers) - 1:
-                x = F.relu(x)
-                x = self.dropout(x)
-        return x

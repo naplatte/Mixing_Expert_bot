@@ -7,6 +7,8 @@ python train_experts.py --expert des
 
 python train_experts.py --expert tweets
 
+python train_experts.py --expert graph
+
 
 ### 自定义参数
 python train_experts.py --expert des,tweets --num_epochs 15 --batch_size 64
