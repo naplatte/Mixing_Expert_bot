@@ -9,6 +9,25 @@ except ImportError as _tg_err:
     RGCNConv = None
     _TORCH_GEOMETRIC_AVAILABLE = False
 
+
+class MLP(nn.Module):
+    """
+    简单的两层 MLP，用于特征降维
+    input_size -> hidden_size -> output_size
+    """
+    def __init__(self, input_size, output_size, hidden_size):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.relu = nn.LeakyReLU()
+
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        return out
+
+
 # description专家模型
 class DesExpert(nn.Module):
     """

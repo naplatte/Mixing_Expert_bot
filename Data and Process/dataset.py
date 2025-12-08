@@ -3,11 +3,27 @@ import numpy as np
 import pandas as pd
 import json
 import os
+import sys
+from pathlib import Path
 
+# 添加项目根目录到 Python 路径（必须在导入 src.model 之前）
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 from datetime import datetime as dt
 from torch.utils.data import Dataset
 from tqdm import tqdm
+
+try:
+    from src.model import MLP
+except ImportError as e:
+    print(f"警告: 无法导入 MLP 类: {e}")
+    print(f"当前 Python 路径: {sys.path}")
+    print(f"项目根目录: {project_root}")
+    raise
 
 class Twibot20(Dataset):
     def __init__(self,root='./processed_data',device='cuda',process=True,save=True): # process:控制是否加载原始数据并进行数据预处理
@@ -76,6 +92,85 @@ class Twibot20(Dataset):
         print('Des_preprocess finished')
         return description
 
+    def Des_embbeding(self, use_mlp=True, output_dim=64, hidden_dim=512):
+        print('开始des数据嵌入 (使用 BAAI/bge-m3 模型)')
+
+        # 根据是否降维选择保存路径
+        if use_mlp:
+            path = os.path.join('./pt_data', f"des_feature_{output_dim}d.pt")
+            mlp_path = os.path.join('./pt_data', f"des_mlp_{output_dim}d.pt")
+        else:
+            path = os.path.join('./pt_data', "des_feature_1024d.pt")
+
+        if not os.path.exists(path):
+            description = np.load(os.path.join(self.root, 'description.npy'), allow_pickle=True)
+            print('加载 BAAI/bge-m3 模型...')
+
+            # 使用 SentenceTransformer 加载 BGE-M3 模型
+            model_name = "BAAI/bge-m3"
+            model = SentenceTransformer(model_name)
+
+            # 将模型移到对应设备
+            device = self.device if self.device == 'cuda' and torch.cuda.is_available() else 'cpu'
+            model = model.to(device)
+
+            des_vec = []
+            print('开始提取特征...')
+
+            # 批量处理以提高效率
+            batch_size = 32
+            for i in tqdm(range(0, len(description), batch_size)):
+                batch_texts = []
+                for j in range(i, min(i + batch_size, len(description))):
+                    # 清理文本
+                    text = str(description[j]).strip()
+                    if text == '' or text.lower() == 'none':
+                        text = ''  # 空简介用空字符串
+                    batch_texts.append(text)
+
+                # 使用 BGE-M3 模型进行编码
+                with torch.no_grad():
+                    embeddings = model.encode(
+                        batch_texts,
+                        batch_size=batch_size,
+                        show_progress_bar=False,
+                        convert_to_tensor=True,
+                        device=device,
+                        normalize_embeddings=True
+                    )
+
+                    for emb in embeddings:
+                        des_vec.append(emb.cpu())
+
+            # 堆叠成张量 [num_users, 1024]
+            des_tensor = torch.stack(des_vec, 0)
+            print(f'BGE-M3 特征提取完成. Shape: {des_tensor.shape}')
+
+            # 使用 MLP 降维
+            if use_mlp:
+                print(f'使用 MLP 降维到 {output_dim} 维...')
+
+                mlp = MLP(input_size=1024, output_size=output_dim, hidden_size=hidden_dim).to(device)
+                mlp.eval()
+
+                with torch.no_grad():
+                    des_tensor = mlp(des_tensor.to(device)).cpu()
+
+                print(f'降维完成. Shape: {des_tensor.shape}')
+
+            des_tensor = des_tensor.to(self.device)
+
+            if self.save:
+                os.makedirs('./pt_data', exist_ok=True)
+                torch.save(des_tensor, path)
+                print(f'特征已保存至 {path}')
+        else:
+            print(f'从 {path} 加载预计算的特征')
+            des_tensor = torch.load(path).to(self.device)
+
+        print(f'Des_embbeding 完成. Shape: {des_tensor.shape}')
+        return des_tensor
+
     # 推文预处理，为推文信息嵌入提供统一的输入，和dec一个道理
     def tweets_preprogress(self):
         print('加载推文信息...',end = ' ')
@@ -105,6 +200,131 @@ class Twibot20(Dataset):
                 pass
         print('推文数据预处理完成')
         return tweets
+
+    # 推文数据嵌入
+    def tweets_embedding(self, use_mlp=True, output_dim=64, hidden_dim=512):
+        print('开始推文数据嵌入 (使用 BAAI/bge-m3 模型)')
+
+        # 根据是否降维选择保存路径
+        if use_mlp:
+            path = os.path.join('./pt_data', f"tweets_feature_{output_dim}d.pt")
+            mlp_path = os.path.join('./pt_data', f"tweets_mlp_{output_dim}d.pt")
+        else:
+            path = os.path.join('./pt_data', "tweets_feature_1024d.pt")
+
+        if not os.path.exists(path):
+            tweets = np.load(os.path.join(self.root, 'tweets.npy'), allow_pickle=True)
+            print('加载 BAAI/bge-m3 模型...')
+
+            # 使用 SentenceTransformer 加载 BGE-M3 模型
+            model_name = "BAAI/bge-m3"
+            model = SentenceTransformer(model_name)
+
+            # 将模型移到对应设备
+            device = self.device if self.device == 'cuda' and torch.cuda.is_available() else 'cpu'
+            model = model.to(device)
+
+            tweets_list = []
+            print('开始提取推文特征...')
+
+            # 遍历每个用户的推文
+            for each_person_tweets in tqdm(tweets):
+                if len(each_person_tweets) == 0 or (len(each_person_tweets) == 1 and each_person_tweets[0] == ''):
+                    # 处理空推文的情况：编码一个空字符串
+                    with torch.no_grad():
+                        user_embedding = model.encode(
+                            [''],
+                            batch_size=1,
+                            show_progress_bar=False,
+                            convert_to_tensor=True,
+                            device=device,
+                            normalize_embeddings=True
+                        )
+                    tweets_list.append(user_embedding.squeeze(0).cpu())
+                else:
+                    # 清理推文文本
+                    cleaned_tweets = []
+                    for tweet in each_person_tweets:
+                        text = str(tweet).strip()
+                        if text == '':
+                            text = ''
+                        cleaned_tweets.append(text)
+
+                    # 批量编码该用户的所有推文
+                    with torch.no_grad():
+                        tweet_embeddings = model.encode(
+                            cleaned_tweets,
+                            batch_size=32,
+                            show_progress_bar=False,
+                            convert_to_tensor=True,
+                            device=device,
+                            normalize_embeddings=True
+                        )
+
+                        # 对该用户的所有推文向量取平均
+                        user_embedding = tweet_embeddings.mean(dim=0)
+                        tweets_list.append(user_embedding.cpu())
+
+            # 堆叠成张量 [num_users, 1024]
+            tweets_tensor = torch.stack(tweets_list, 0)
+            print(f'BGE-M3 特征提取完成. Shape: {tweets_tensor.shape}')
+
+            # 使用 MLP 降维
+            if use_mlp:
+                print(f'使用 MLP 降维到 {output_dim} 维...')
+
+                mlp = MLP(input_size=1024, output_size=output_dim, hidden_size=hidden_dim).to(device)
+                mlp.eval()
+
+                with torch.no_grad():
+                    tweets_tensor = mlp(tweets_tensor.to(device)).cpu()
+
+                print(f'降维完成. Shape: {tweets_tensor.shape}')
+
+
+            tweets_tensor = tweets_tensor.to(self.device)
+
+            if self.save:
+                os.makedirs('./pt_data', exist_ok=True)
+                torch.save(tweets_tensor, path)
+                print(f'特征已保存至 {path}')
+        else:
+            print(f'从 {path} 加载预计算的推文嵌入')
+            tweets_tensor = torch.load(path).to(self.device)
+
+        print(f'tweets_embedding 完成. Shape: {tweets_tensor.shape}')
+        return tweets_tensor
+
+    metadata - num类
+    def num_preprocess(self):
+        print('加载数值型属性信息...', end=' ')
+        path = os.path.join('./pt_data', 'num_prop.pt')
+        if not os.path.exists(path):
+            path = self.root
+            # 粉丝数
+            if not os.path.exits(path + "followers_count.pt"):
+                followers_count = []
+                for i in range (self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data['profile'][i]['followers_count'] is None:
+                        followers_count.append(0)
+                    else:
+                        followers_count.append(self.df_data_labeled['profile'][i]['followers_count'])
+                followers_count=torch.tensor(np.array(followers_count,dtype=np.float32)).to(self.device)
+                if self.save:
+                    torch.save(followers_count,path+"followers_count.pt")
+
+            # 关注数
+            friend_count = []
+            for i in range(self.df_data.shape[0]):
+                if self.df_data['profile'][i] is None or self.df_data['profile'][i]['friends_count'] is None:
+                    friends_count.append(0)
+                else:
+                    friends_count.append(self.df_data['profile'][i]['friends_count'])
+            friends_count = torch.tensor(np.array(friends_count, dtype=np.float32)).to(self.device)
+            if self.save:
+                torch.save(friends_count, path + 'friends_count.pt')
+
+
 
     # 构建异质图
     def build_graph(self):
@@ -160,55 +380,34 @@ class Twibot20(Dataset):
         return train_idx,val_idx,test_idx
 
 
-def create_dataloader(root='./processed_data', device='cuda', process=True, save=True):
+def create_dataloader(root='./processed_data', device='cuda', process=True, save=True,
+                      use_mlp=True, output_dim=64, hidden_dim=512):
     print('开始数据预处理...')
 
-    # 确保必要的目录存在
-    os.makedirs(root, exist_ok=True)
-    os.makedirs('./pt_data', exist_ok=True)
-
     # 初始化数据集
-    print('\n[1/6] 初始化 Twibot20 数据集...')
+    print('\n[1/8] 初始化 Twibot20 数据集...')
     dataset = Twibot20(root=root, device=device, process=process, save=save)
 
-    # 加载标签数据
-    print('\n[2/6] 加载标签数据...')
-    labels = dataset.load_labels()
-    print(f'✓ 标签数据加载完成，形状: {labels.shape}')
 
-    # 处理用户简介
-    print('\n[3/6] 处理用户简介数据...')
-    descriptions = dataset.Des_preprocess()
-    print(f'✓ 简介数据处理完成，数量: {len(descriptions)}')
+    # 生成简介嵌入特征
+    print('\n[4/8] 生成简介嵌入特征...')
+    des_features = dataset.Des_embbeding(use_mlp=use_mlp, output_dim=output_dim, hidden_dim=hidden_dim)
+    print(f'✓ 简介嵌入特征生成完成，形状: {des_features.shape}')
 
-    # 处理推文数据
-    print('\n[4/6] 处理推文数据...')
-    tweets = dataset.tweets_preprogress()
-    print(f'✓ 推文数据处理完成，用户数量: {len(tweets)}')
+    # 生成推文嵌入特征
+    print('\n[6/8] 生成推文嵌入特征...')
+    tweets_features = dataset.tweets_embedding(use_mlp=use_mlp, output_dim=output_dim, hidden_dim=hidden_dim)
+    print(f'✓ 推文嵌入特征生成完成，形状: {tweets_features.shape}')
 
-    # 构建异质图
-    print('\n[5/6] 构建异质图...')
-    edge_index, edge_type = dataset.build_graph()
-    print(f'✓ 异质图构建完成，边数量: {edge_index.shape[1]}, 边类型数量: {edge_type.shape[0]}')
-
-    # 获取训练集、验证集、测试集的索引
-    print('\n[6/6] 获取数据集划分索引...')
-    train_idx, val_idx, test_idx = dataset.train_val_test_mask()
-    print(f'✓ 训练集: {len(train_idx)} 样本')
-    print(f'✓ 验证集: {len(val_idx)} 样本')
-    print(f'✓ 测试集: {len(test_idx)} 样本')
 
     # 保存数据集信息摘要
     if save:
         print('\n保存数据集信息摘要...')
         summary = {
-            'total_samples': len(labels),
-            'train_samples': len(train_idx),
-            'val_samples': len(val_idx),
-            'test_samples': len(test_idx),
-            'num_edges': edge_index.shape[1] if isinstance(edge_index, torch.Tensor) else 0,
-            'description_samples': len(descriptions),
-            'tweet_samples': len(tweets),
+            'des_feature_dim': des_features.shape[1] if len(des_features.shape) > 1 else des_features.shape[0],
+            'tweets_feature_dim': tweets_features.shape[1] if len(tweets_features.shape) > 1 else tweets_features.shape[0],
+            'use_mlp': use_mlp,
+            'output_dim': output_dim if use_mlp else 1024,
             'device': device,
             'created_at': dt.now().strftime('%Y-%m-%d %H:%M:%S')
         }
@@ -216,17 +415,6 @@ def create_dataloader(root='./processed_data', device='cuda', process=True, save
         with open(summary_path, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=4, ensure_ascii=False)
         print(f'✓ 数据集摘要已保存至: {summary_path}')
-
-    print('\n' + '='*60)
-    print('数据加载器创建完成！')
-    print('='*60)
-    print(f'\n生成的文件位置:')
-    print(f'  - 标签文件: ./pt_data/label.pt')
-    print(f'  - 简介文件: {root}/description.npy')
-    print(f'  - 推文文件: {root}/tweets.npy')
-    print(f'  - 图结构文件: {root}/edge_index.pt, {root}/edge_type.pt')
-    print(f'  - 数据摘要: {root}/dataset_summary.json')
-    print('='*60 + '\n')
 
 
 if __name__ == '__main__':
@@ -241,7 +429,5 @@ if __name__ == '__main__':
         save=True
     )
 
-    print('数据加载完成！可以使用返回的 data 字典访问各类数据。')
-    print(f'可用的数据键: {list(data.keys())}')
 
 
