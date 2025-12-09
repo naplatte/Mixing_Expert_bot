@@ -14,10 +14,124 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import Twibot20
-from src.model import DesExpert, TweetsExpert, GraphExpert
+from src.model import DesExpert, DesExpertMoE, TweetsExpert, GraphExpert
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
+
+
+# ==================== 辅助函数 ====================
+
+def _extract_expert_features_with_mask(expert_name, node_indices, dataset_path, checkpoint_dir, device, twibot_dataset=None):
+    """
+    从已训练的专家模型中提取特征
+
+    Args:
+        expert_name: 专家名称 ('des', 'tweets')
+        node_indices: 需要提取特征的节点索引列表
+        dataset_path: 数据集路径
+        checkpoint_dir: 模型检查点目录
+        device: 设备
+        twibot_dataset: 预加载的数据集（可选）
+
+    Returns:
+        embeddings: [num_nodes, expert_dim] 特征向量
+        mask: [num_nodes] bool tensor，标记哪些节点有有效特征
+    """
+    from tqdm import tqdm
+
+    # 加载数据集（如果未提供）
+    if twibot_dataset is None:
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+
+    # 加载已训练的专家模型
+    checkpoint_path = Path(checkpoint_dir) / f'{expert_name}_expert_best.pth'
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"未找到专家模型检查点: {checkpoint_path}")
+
+    print(f"    加载模型检查点: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # 根据专家类型创建模型并加载权重
+    if expert_name == 'des':
+        model = DesExpert(device=device).to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # 获取描述数据
+        descriptions = twibot_dataset.Des_preprocess()
+        if isinstance(descriptions, np.ndarray):
+            descriptions = descriptions.tolist()
+
+        # 提取特征
+        model.eval()
+        embeddings_list = []
+        valid_mask = []
+
+        batch_size = 32
+        with torch.no_grad():
+            for i in tqdm(range(0, len(node_indices), batch_size), desc=f"  提取 {expert_name} 特征"):
+                batch_indices = node_indices[i:i+batch_size]
+                batch_descriptions = [descriptions[idx] for idx in batch_indices]
+
+                # 检查是否有有效描述
+                batch_valid = []
+                for desc in batch_descriptions:
+                    desc_str = str(desc).strip()
+                    is_valid = desc_str != '' and desc_str.lower() != 'none'
+                    batch_valid.append(is_valid)
+
+                # 提取特征
+                expert_repr, _ = model(batch_descriptions)
+                embeddings_list.append(expert_repr.cpu())
+                valid_mask.extend(batch_valid)
+
+        embeddings = torch.cat(embeddings_list, dim=0)
+        mask = torch.tensor(valid_mask, dtype=torch.bool)
+
+    elif expert_name == 'tweets':
+        model = TweetsExpert(device=device).to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # 获取推文数据
+        tweets_list = twibot_dataset.tweets_preprogress()
+        if isinstance(tweets_list, np.ndarray):
+            tweets_list = tweets_list.tolist()
+
+        # 提取特征
+        model.eval()
+        embeddings_list = []
+        valid_mask = []
+
+        batch_size = 32
+        with torch.no_grad():
+            for i in tqdm(range(0, len(node_indices), batch_size), desc=f"  提取 {expert_name} 特征"):
+                batch_indices = node_indices[i:i+batch_size]
+                batch_tweets = [tweets_list[idx] for idx in batch_indices]
+
+                # 检查是否有有效推文
+                batch_valid = []
+                for user_tweets in batch_tweets:
+                    if isinstance(user_tweets, list) and len(user_tweets) > 0:
+                        cleaned = [str(t).strip() for t in user_tweets if str(t).strip() != '' and str(t).strip() != 'None']
+                        is_valid = len(cleaned) > 0
+                    else:
+                        is_valid = False
+                    batch_valid.append(is_valid)
+
+                # 提取特征
+                expert_repr, _ = model(batch_tweets)
+                embeddings_list.append(expert_repr.cpu())
+                valid_mask.extend(batch_valid)
+
+        embeddings = torch.cat(embeddings_list, dim=0)
+        mask = torch.tensor(valid_mask, dtype=torch.bool)
+
+    else:
+        raise ValueError(f"不支持的专家类型: {expert_name}")
+
+    print(f"    特征形状: {embeddings.shape}, 有效样本: {mask.sum().item()}/{len(mask)}")
+
+    return embeddings, mask
 
 
 # ==================== Description Expert ====================
@@ -62,23 +176,32 @@ class DescriptionDataset(Dataset):
 
 def create_des_expert_config(
     dataset_path=None,
-    batch_size=64,
+    batch_size=32,
     learning_rate=5e-4,
     weight_decay=0.01,
     device='cuda',
-    checkpoint_dir='../../autodl-fs/checkpoints',
+    checkpoint_dir='../../autodl-fs/model',
     model_name='microsoft/deberta-v3-base',
     max_grad_norm=1.0,
+    dropout=0.3,
+    early_stopping_patience=4,
+    num_experts=4,  # MoE 中的专家数量（默认4个）
+    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
     twibot_dataset=None
 ):
     """
-    创建 Description Expert 配置 (优化版本，针对 DeBERTa-v3)
+    创建 Description Expert 配置 (使用 DeBERTa-v3-base + MoE + Top-K)
 
     Args:
-        batch_size: 批次大小，默认64（相比32更大，因为只训练MLP）
-        learning_rate: 学习率，默认5e-4（相比2e-5更高，适合训练MLP）
-        weight_decay: 权重衰减，默认0.01，防止过拟合
+        model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
+        batch_size: 批次大小，默认32
+        learning_rate: 学习率，默认5e-4 (0.0005)
+        weight_decay: 权重衰减，默认0.01
+        dropout: Dropout率，默认0.3
         max_grad_norm: 梯度裁剪阈值，默认1.0
+        early_stopping_patience: 早停耐心值，默认4
+        num_experts: MoE 中的专家数量，默认4
+        top_k: 每次选择的专家数量（Top-K），默认2
         twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
 
     Returns:
@@ -88,12 +211,17 @@ def create_des_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Description Expert (DeBERTa-v3 优化版)")
+    print(f"配置 Description Expert with MoE + Top-K (DeBERTa-v3-base)")
     print(f"{'='*60}")
+    print(f"  模型: {model_name}")
+    print(f"  专家数量: {num_experts}")
+    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
     print(f"  权重衰减: {weight_decay}")
+    print(f"  Dropout: {dropout}")
     print(f"  梯度裁剪: {max_grad_norm}")
+    print(f"  早停耐心值: {early_stopping_patience}")
 
     # 加载数据（如果没有预加载）
     if twibot_dataset is None:
@@ -139,11 +267,20 @@ def create_des_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # 初始化模型
-    print("初始化模型...")
-    model = DesExpert(model_name=model_name, device=device, dropout=0.2).to(device)
+    # 初始化模型 (使用 MoE + Top-K 版本)
+    print("初始化 MoE + Top-K 模型...")
+    model = DesExpertMoE(
+        model_name=model_name,
+        device=device,
+        dropout=dropout,
+        num_experts=num_experts,
+        top_k=top_k,
+        expert_dim=64,
+        hidden_dim=768
+    ).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
 
     # 优化器和损失函数 - 使用权重衰减
     optimizer = AdamW(
@@ -173,8 +310,12 @@ def create_des_expert_config(
         'checkpoint_dir': checkpoint_dir,
         'extract_fn': extract_fn,
         'max_grad_norm': max_grad_norm,  # 梯度裁剪
+        'early_stopping_patience': early_stopping_patience,  # 早停
         'batch_size': batch_size,
-        'learning_rate': learning_rate
+        'learning_rate': learning_rate,
+        'dropout': dropout,
+        'num_experts': num_experts,  # MoE 专家数量
+        'top_k': top_k  # Top-K 选择
     }
 
 
@@ -244,7 +385,7 @@ def create_tweets_expert_config(
     batch_size=32,
     learning_rate=1e-3,
     device='cuda',
-    checkpoint_dir='../../autodl-fs/checkpoints',
+    checkpoint_dir='../../autodl-fs/model',
     roberta_model_name='distilroberta-base',
     twibot_dataset=None
 ):
@@ -382,7 +523,7 @@ def create_graph_expert_config(
     learning_rate=1e-3,
     weight_decay=1e-4,
     device='cuda',
-    checkpoint_dir='../../autodl-fs/checkpoints',
+    checkpoint_dir='../../autodl-fs/model',
     hidden_dim=128,
     expert_dim=64,
     num_layers=2,
@@ -486,10 +627,8 @@ def create_graph_expert_config(
                 print(f"\n  提取 {expert_name} 专家特征...")
 
                 # 提取该专家对所有节点的表示（包括支持集）
-                # 复用已加载的 twibot_dataset，避免重复加载
-                from scripts.gating_network import extract_expert_features_with_mask
-
-                embeddings, mask = extract_expert_features_with_mask(
+                # 使用本地函数提取特征
+                embeddings, mask = _extract_expert_features_with_mask(
                     expert_name, all_node_indices, dataset_path, checkpoint_dir, device,
                     twibot_dataset=twibot_dataset  # 传入已加载的数据集，避免重复加载
                 )

@@ -18,7 +18,7 @@ from expert_trainer import ExpertTrainer
 from configs.expert_configs import get_expert_config
 
 # 训练单个专家
-def train_single_expert(expert_name, config_params, num_epochs=10):
+def train_single_expert(expert_name, config_params, num_epochs=10, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding'):
     # 获取专家配置
     config = get_expert_config(expert_name, **config_params)
 
@@ -26,7 +26,7 @@ def train_single_expert(expert_name, config_params, num_epochs=10):
     trainer = ExpertTrainer(config)
 
     # 开始训练
-    history = trainer.train(num_epochs)
+    history = trainer.train(num_epochs, save_embeddings=save_embeddings, embeddings_dir=embeddings_dir)
 
     return history
 
@@ -66,7 +66,7 @@ def check_expert_dependencies(expert_name, checkpoint_dir):
     return True
 
 
-def train_all_experts(config_params, num_epochs=10, experts=None):
+def train_all_experts(config_params, num_epochs=10, experts=None, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding'):
     """
     训练所有专家或指定的专家列表
 
@@ -74,6 +74,8 @@ def train_all_experts(config_params, num_epochs=10, experts=None):
         config_params: 配置参数字典
         num_epochs: 训练轮数
         experts: 要训练的专家列表，None表示训练所有可用专家
+        save_embeddings: 是否保存特征嵌入
+        embeddings_dir: 特征嵌入保存目录
 
     Returns:
         dict: 所有专家的训练结果
@@ -90,6 +92,9 @@ def train_all_experts(config_params, num_epochs=10, experts=None):
     print(f"专家列表: {experts}")
     print(f"训练轮数: {num_epochs}")
     print(f"设备: {config_params['device']}")
+    print(f"保存特征嵌入: {save_embeddings}")
+    if save_embeddings:
+        print(f"特征嵌入保存路径: {embeddings_dir}")
     print("="*60 + "\n")
 
     # 逐个训练专家
@@ -104,7 +109,9 @@ def train_all_experts(config_params, num_epochs=10, experts=None):
             continue
 
         try:
-            history = train_single_expert(expert_name, config_params, num_epochs)
+            history = train_single_expert(expert_name, config_params, num_epochs,
+                                         save_embeddings=save_embeddings,
+                                         embeddings_dir=embeddings_dir)
             results[expert_name] = history
         except Exception as e:
             print(f"\n错误: 训练 {expert_name} 专家时出错: {str(e)}")
@@ -139,7 +146,7 @@ def main():
                         help='要训练的专家 (des, tweets, graph, all)')
     parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
-    parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-fs/checkpoints',
+    parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-fs/model',
                         help='模型保存目录')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='批次大小')
@@ -157,6 +164,10 @@ def main():
                         help='RoBERTa模型名称 (用于Tweets Expert)')
     parser.add_argument('--freeze_bert', action='store_true', default=True,
                         help='是否冻结BERT参数 (仅训练MLP)')
+    parser.add_argument('--num_experts', type=int, default=4,
+                        help='Description Expert MoE 中的专家数量 (默认4)')
+    parser.add_argument('--top_k', type=int, default=2,
+                        help='Description Expert MoE Top-K 选择数量 (默认2)')
 
     # Graph Expert 参数
     parser.add_argument('--graph_hidden_dim', type=int, default=128,
@@ -167,6 +178,12 @@ def main():
                         help='图专家Dropout比率')
     parser.add_argument('--graph_expert_names', type=str, default='des,tweets',
                         help='图专家依赖的专家列表（逗号分隔）')
+
+    # 特征嵌入保存参数
+    parser.add_argument('--save_embeddings', action='store_true', default=True,
+                        help='是否保存特征嵌入')
+    parser.add_argument('--embeddings_dir', type=str, default='../../autodl-fs/labeled_embedding',
+                        help='特征嵌入保存目录')
 
     args = parser.parse_args()
 
@@ -191,6 +208,8 @@ def main():
         'bert_model_name': args.bert_model,
         'roberta_model_name': args.roberta_model,
         'freeze_bert': args.freeze_bert,
+        'num_experts': args.num_experts,  # Description Expert MoE 专家数量
+        'top_k': args.top_k,  # Description Expert MoE Top-K 选择
         # Graph Expert 参数
         'hidden_dim': args.graph_hidden_dim,
         'num_layers': args.graph_num_layers,
@@ -205,11 +224,15 @@ def main():
     # 训练专家
     if args.expert == 'all':
         # 训练所有专家
-        results = train_all_experts(base_config, args.num_epochs)
+        results = train_all_experts(base_config, args.num_epochs,
+                                   save_embeddings=args.save_embeddings,
+                                   embeddings_dir=args.embeddings_dir)
     else:
         # 训练单个专家
         experts_to_train = [e.strip() for e in args.expert.split(',')]
-        results = train_all_experts(base_config, args.num_epochs, experts=experts_to_train)
+        results = train_all_experts(base_config, args.num_epochs, experts=experts_to_train,
+                                   save_embeddings=args.save_embeddings,
+                                   embeddings_dir=args.embeddings_dir)
 
     print("\n✓ 所有训练任务完成!")
 

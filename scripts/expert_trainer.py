@@ -45,6 +45,11 @@ class ExpertTrainer:
         # 梯度裁剪
         self.max_grad_norm = expert_config.get('max_grad_norm', None)
 
+        # 早停机制
+        self.early_stopping_patience = expert_config.get('early_stopping_patience', None)
+        self.early_stopping_counter = 0
+        self.best_val_metric = float('inf')  # 用于早停的指标（验证loss）
+
         self.best_val_loss = float('inf')
         self.history = {'train': [], 'val': [], 'test': {}}
     
@@ -179,18 +184,34 @@ class ExpertTrainer:
         if valid_total < total:
             print(f"  [验证集] 总样本: {total}, 有效样本: {valid_total} (过滤 {total - valid_total} 个无效样本)")
 
-        # 保存最佳模型
+        # 保存最佳模型和早停逻辑
+        should_stop = False
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
             self.save_checkpoint('best', epoch, {'val_loss': avg_loss, 'val_acc': acc, 'val_f1': f1})
             print(f"  ✓ 保存最佳模型 (Val Loss: {avg_loss:.4f}, Val F1: {f1:.4f})")
-        
+
+            # 重置早停计数器
+            if self.early_stopping_patience is not None:
+                self.early_stopping_counter = 0
+                self.best_val_metric = avg_loss
+        else:
+            # 验证loss没有改善
+            if self.early_stopping_patience is not None:
+                self.early_stopping_counter += 1
+                print(f"  ⚠ 验证Loss未改善 ({self.early_stopping_counter}/{self.early_stopping_patience})")
+
+                if self.early_stopping_counter >= self.early_stopping_patience:
+                    print(f"  ⏹ 触发早停机制！已连续{self.early_stopping_patience}轮未改善")
+                    should_stop = True
+
         return {
             'loss': avg_loss,
             'acc': acc,
             'precision': precision,
             'recall': recall,
-            'f1': f1
+            'f1': f1,
+            'should_stop': should_stop
         }
     
     def test(self):
@@ -258,8 +279,83 @@ class ExpertTrainer:
             'f1': f1
         }
     
-    def train(self, num_epochs):
-        """完整训练流程"""
+    def extract_and_save_embeddings(self, save_dir='../../autodl-fs/labeled_embedding', force=False):
+        """
+        提取并保存所有数据集的特征嵌入
+
+        Args:
+            save_dir: 保存目录，默认为 '../../autodl-fs/labeled_embedding'
+            force: 是否强制重新提取并保存，即使文件已存在（默认 False）
+        """
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        save_file = save_path / f'{self.name}_embeddings.pt'
+
+        # 检查文件是否已存在
+        if save_file.exists() and not force:
+            print(f"\n[{self.name.upper()}] ✓ 特征嵌入文件已存在，跳过提取")
+            print(f"  文件路径: {save_file}")
+            print(f"  如需重新提取，请设置 force=True 或手动删除该文件")
+            # 加载并返回已有的嵌入
+            all_embeddings = torch.load(save_file, map_location='cpu')
+            return all_embeddings
+
+        print(f"\n[{self.name.upper()}] 提取并保存特征嵌入...")
+
+        # 加载最佳模型
+        self.load_checkpoint('best')
+        self.model.eval()
+
+        all_embeddings = {}
+
+        # 对每个数据集提取特征
+        for split_name, loader in [('train', self.train_loader),
+                                     ('val', self.val_loader),
+                                     ('test', self.test_loader)]:
+            embeddings_list = []
+            labels_list = []
+
+            with torch.no_grad():
+                for batch in tqdm(loader, desc=f"[{self.name.upper()}] 提取 {split_name} 特征"):
+                    # 提取数据
+                    result = self.extract_fn(batch, self.device)
+                    if len(result) == 3:
+                        inputs, labels, has_data = result
+                    else:
+                        inputs, labels = result
+                        has_data = None
+
+                    # 获取特征嵌入（64维专家表示）
+                    expert_repr, _ = self.model(*inputs)
+
+                    embeddings_list.append(expert_repr.cpu())
+                    labels_list.append(labels.cpu())
+
+            # 合并所有批次
+            all_embeddings[split_name] = {
+                'embeddings': torch.cat(embeddings_list, dim=0),  # [N, 64]
+                'labels': torch.cat(labels_list, dim=0)  # [N, 1]
+            }
+
+            print(f"  {split_name} 特征形状: {all_embeddings[split_name]['embeddings'].shape}")
+
+        # 保存到文件
+        torch.save(all_embeddings, save_file)
+        print(f"  ✓ 特征嵌入已保存到: {save_file}")
+
+        return all_embeddings
+
+    def train(self, num_epochs, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding', force_save_embeddings=False):
+        """
+        完整训练流程
+
+        Args:
+            num_epochs: 训练轮数
+            save_embeddings: 是否在训练完成后保存特征嵌入
+            embeddings_dir: 特征嵌入保存目录
+            force_save_embeddings: 是否强制重新提取并保存嵌入，即使文件已存在（默认 False）
+        """
         print(f"\n{'='*60}")
         print(f"开始训练 {self.name.upper()} Expert")
         print(f"{'='*60}\n")
@@ -277,7 +373,12 @@ class ExpertTrainer:
                   f"Acc: {train_metrics['acc']:.4f}, F1: {train_metrics['f1']:.4f}")
             print(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
                   f"Acc: {val_metrics['acc']:.4f}, F1: {val_metrics['f1']:.4f}")
-        
+
+            # 检查早停
+            if val_metrics.get('should_stop', False):
+                print(f"\n⏹ 早停触发，在第 {epoch} 轮结束训练")
+                break
+
         # 测试
         test_metrics = self.test()
         self.history['test'] = test_metrics
@@ -292,6 +393,15 @@ class ExpertTrainer:
         print(f"  F1 Score: {test_metrics['f1']:.4f}")
         print(f"{'='*60}\n")
         
+        # 如果是 DesExpertMoE 模型，打印专家使用统计
+        from src.model import DesExpertMoE
+        if isinstance(self.model, DesExpertMoE):
+            self.model.print_expert_usage_stats()
+
+        # 保存特征嵌入
+        if save_embeddings:
+            self.extract_and_save_embeddings(save_dir=embeddings_dir, force=force_save_embeddings)
+
         return self.history
     
     def save_checkpoint(self, name, epoch=None, extra_info=None):
