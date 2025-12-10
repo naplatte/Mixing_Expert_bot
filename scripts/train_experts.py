@@ -19,8 +19,25 @@ from configs.expert_configs import get_expert_config
 
 # 训练单个专家
 def train_single_expert(expert_name, config_params, num_epochs=10, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding'):
+    # 根据专家类型调整 MoE 参数
+    adjusted_params = config_params.copy()
+
+    if expert_name == 'cat':
+        # Cat Expert 使用专用的 MoE 参数（3选1）
+        if 'cat_num_experts' in adjusted_params:
+            adjusted_params['num_experts'] = adjusted_params['cat_num_experts']
+        if 'cat_top_k' in adjusted_params:
+            adjusted_params['top_k'] = adjusted_params['cat_top_k']
+
+    elif expert_name == 'num':
+        # Num Expert 使用专用的 MoE 参数（3选1）
+        if 'num_num_experts' in adjusted_params:
+            adjusted_params['num_experts'] = adjusted_params['num_num_experts']
+        if 'num_top_k' in adjusted_params:
+            adjusted_params['top_k'] = adjusted_params['num_top_k']
+
     # 获取专家配置
-    config = get_expert_config(expert_name, **config_params)
+    config = get_expert_config(expert_name, **adjusted_params)
 
     # 创建训练器
     trainer = ExpertTrainer(config)
@@ -82,7 +99,7 @@ def train_all_experts(config_params, num_epochs=10, experts=None, save_embedding
     """
     # 默认训练的专家列表（按依赖顺序）
     if experts is None:
-        experts = ['des', 'post', 'cat', 'graph']  # graph 依赖 des 和 post，所以放最后
+        experts = ['des', 'post', 'cat', 'num', 'graph']  # graph 依赖 des 和 post，所以放最后
 
     results = {}
 
@@ -143,7 +160,7 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练社交机器人检测专家模型')
     parser.add_argument('--expert', type=str, default='all',
-                        help='要训练的专家 (des, post, tweets, cat, graph, all)')
+                        help='要训练的专家 (des, post, tweets, cat, num, graph, all)')
     parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
     parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-fs/model',
@@ -162,6 +179,18 @@ def main():
                         help='Des/Post Expert MoE 中的专家数量 (默认4)')
     parser.add_argument('--top_k', type=int, default=2,
                         help='Des/Post Expert MoE Top-K 选择数量 (默认2)')
+
+    # Cat Expert MoE 参数
+    parser.add_argument('--cat_num_experts', type=int, default=3,
+                        help='Cat Expert MoE 中的专家数量 (默认3)')
+    parser.add_argument('--cat_top_k', type=int, default=1,
+                        help='Cat Expert MoE Top-K 选择数量 (默认1)')
+
+    # Num Expert MoE 参数
+    parser.add_argument('--num_num_experts', type=int, default=3,
+                        help='Num Expert MoE 中的专家数量 (默认3)')
+    parser.add_argument('--num_top_k', type=int, default=1,
+                        help='Num Expert MoE Top-K 选择数量 (默认1)')
 
     # 旧版 Tweets Expert 参数 (保留兼容)
     parser.add_argument('--roberta_model', type=str, default='distilroberta-base',
@@ -205,6 +234,12 @@ def main():
         # Des/Post Expert MoE 参数
         'num_experts': args.num_experts,
         'top_k': args.top_k,
+        # Cat Expert MoE 参数 (3选1)
+        'cat_num_experts': args.cat_num_experts,
+        'cat_top_k': args.cat_top_k,
+        # Num Expert MoE 参数 (3选1)
+        'num_num_experts': args.num_num_experts,
+        'num_top_k': args.num_top_k,
         # 旧版 Tweets Expert 参数 (兼容)
         'roberta_model_name': args.roberta_model,
         # Graph Expert 参数

@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import Twibot20
-from src.model import DesExpert, DesExpertMoE, TweetsExpert, PostExpert, GraphExpert, CatExpert
+from src.model import DesExpert, DesExpertMoE, TweetsExpert, PostExpert, GraphExpert, CatExpert, NumExpert
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -982,8 +982,8 @@ def create_cat_expert_config(
     max_grad_norm=1.0,
     dropout=0.2,
     early_stopping_patience=5,
-    num_experts=4,  # MoE 中的专家数量（默认4个）
-    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
+    num_experts=3,  # MoE 中的专家数量（默认3个）
+    top_k=1,        # Top-K 选择，每次只用权重最大的K个专家（默认1个）
     hidden_dim=64,  # 两层MLP隐藏层维度
     expert_dim=64,  # 专家输出维度
     twibot_dataset=None
@@ -1005,8 +1005,8 @@ def create_cat_expert_config(
         dropout: Dropout率，默认0.2
         max_grad_norm: 梯度裁剪阈值，默认1.0
         early_stopping_patience: 早停耐心值，默认5
-        num_experts: MoE 中的专家数量，默认4
-        top_k: 每次选择的专家数量（Top-K），默认2
+        num_experts: MoE 中的专家数量，默认3
+        top_k: 每次选择的专家数量（Top-K），默认1
         hidden_dim: 两层MLP隐藏层维度，默认64
         expert_dim: 专家输出维度，默认64
         twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
@@ -1018,7 +1018,7 @@ def create_cat_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Category Property Expert with MoE + Top-K")
+    print(f"配置 Category Property Expert with MoE + Top-K (3选1)")
     print(f"{'='*60}")
     print(f"  专家数量: {num_experts}")
     print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
@@ -1132,6 +1132,207 @@ def create_cat_expert_config(
     }
 
 
+# ==================== Numerical Property Expert ====================
+
+class NumDataset(Dataset):
+    """Numerical Property Expert 数据集"""
+    def __init__(self, num_features, labels, mode='train'):
+        """
+        Args:
+            num_features: 数值属性张量 [num_samples, num_features] (已标准化)
+            labels: 标签列表
+            mode: 'train' | 'val' | 'test'
+        """
+        self.mode = mode
+        self.num_features = num_features
+        self.labels = labels
+
+        print(f"  [{mode}集] 有效样本: {len(self.labels)}")
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        num_feat = self.num_features[idx]
+        label = self.labels[idx]
+
+        # 确保返回tensor
+        if not isinstance(num_feat, torch.Tensor):
+            num_feat = torch.tensor(num_feat, dtype=torch.float32)
+        if not isinstance(label, torch.Tensor):
+            label = torch.tensor(label, dtype=torch.float32)
+
+        return {
+            'num_features': num_feat,
+            'label': label
+        }
+
+
+def create_num_expert_config(
+    dataset_path=None,
+    batch_size=64,
+    learning_rate=1e-3,
+    weight_decay=0.01,
+    device='cuda',
+    checkpoint_dir='../../autodl-fs/model',
+    max_grad_norm=1.0,
+    dropout=0.2,
+    early_stopping_patience=5,
+    num_experts=3,  # MoE 中的专家数量（默认3个）
+    top_k=1,        # Top-K 选择，每次只用权重最大的K个专家（默认1个）
+    hidden_dim=64,  # 全连接层隐藏层维度
+    expert_dim=64,  # 专家输出维度
+    twibot_dataset=None
+):
+    """
+    创建 Numerical Property Expert 配置 (MoE + Top-K)
+
+    数值属性包括:
+        - followers_count (粉丝数)
+        - friends_count (关注数)
+        - favourites_count (点赞数)
+        - statuses_count (推文数)
+        - screen_name_length (用户名长度)
+        - active_days (账户活跃天数)
+
+    数据预处理:
+        - z-score 标准化: (x - mean) / std
+
+    Args:
+        dataset_path: 数据集路径
+        batch_size: 批次大小，默认64
+        learning_rate: 学习率，默认1e-3
+        weight_decay: 权重衰减，默认0.01
+        dropout: Dropout率，默认0.2
+        max_grad_norm: 梯度裁剪阈值，默认1.0
+        early_stopping_patience: 早停耐心值，默认5
+        num_experts: MoE 中的专家数量，默认3
+        top_k: 每次选择的专家数量（Top-K），默认1
+        hidden_dim: 全连接层隐藏层维度，默认64
+        expert_dim: 专家输出维度，默认64
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+
+    Returns:
+        dict: 包含模型、数据加载器、优化器等的配置字典
+    """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
+    print(f"\n{'='*60}")
+    print(f"配置 Numerical Property Expert with MoE + Top-K (3选1)")
+    print(f"{'='*60}")
+    print(f"  专家数量: {num_experts}")
+    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
+    print(f"  批次大小: {batch_size}")
+    print(f"  学习率: {learning_rate}")
+    print(f"  权重衰减: {weight_decay}")
+    print(f"  Dropout: {dropout}")
+    print(f"  梯度裁剪: {max_grad_norm}")
+    print(f"  早停耐心值: {early_stopping_patience}")
+
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("加载数据...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("使用预加载的数据集...")
+
+    # 加载数值属性数据（已经过 z-score 标准化）
+    num_features = twibot_dataset.num_prop_preprocess()  # [num_samples, 6]
+    labels = twibot_dataset.load_labels()
+
+    # 转换为CPU tensor/numpy
+    if isinstance(num_features, torch.Tensor):
+        num_features = num_features.cpu()
+    labels = labels.cpu().numpy()
+
+    # 获取输入维度（数值属性数量）
+    input_dim = num_features.shape[1]
+    print(f"  数值属性维度: {input_dim}")
+
+    # 获取训练/验证/测试集索引
+    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
+    train_idx = list(train_idx)
+    val_idx = list(val_idx)
+    test_idx = list(test_idx)
+
+    # 划分数据集
+    train_num = num_features[train_idx]
+    train_labels = labels[train_idx]
+
+    val_num = num_features[val_idx]
+    val_labels = labels[val_idx]
+
+    test_num = num_features[test_idx]
+    test_labels = labels[test_idx]
+
+    print(f"  训练集: {len(train_idx)} 样本")
+    print(f"  验证集: {len(val_idx)} 样本")
+    print(f"  测试集: {len(test_idx)} 样本")
+
+    # 创建数据集和数据加载器
+    print("创建数据加载器...")
+    train_dataset = NumDataset(train_num, train_labels, mode='train')
+    val_dataset = NumDataset(val_num, val_labels, mode='val')
+    test_dataset = NumDataset(test_num, test_labels, mode='test')
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # 初始化模型 (使用 MoE + Top-K 版本)
+    print("初始化 MoE + Top-K 模型...")
+    model = NumExpert(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        expert_dim=expert_dim,
+        num_experts=num_experts,
+        top_k=top_k,
+        dropout=dropout,
+        device=device
+    ).to(device)
+    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
+
+    # 优化器和损失函数 - 使用权重衰减
+    optimizer = AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
+    criterion = nn.BCELoss()
+
+    # 数据提取函数
+    def extract_fn(batch, device):
+        num_features = batch['num_features'].to(device)
+        labels = batch['label'].to(device).unsqueeze(1)
+        return (num_features,), labels
+
+    return {
+        'name': 'num',
+        'model': model,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'optimizer': optimizer,
+        'criterion': criterion,
+        'device': device,
+        'checkpoint_dir': checkpoint_dir,
+        'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,
+        'early_stopping_patience': early_stopping_patience,
+        'batch_size': batch_size,
+        'learning_rate': learning_rate,
+        'dropout': dropout,
+        'num_experts': num_experts,
+        'top_k': top_k,
+        'input_dim': input_dim
+    }
+
+
 # ==================== 配置注册表 ====================
 
 EXPERT_CONFIGS = {
@@ -1140,6 +1341,7 @@ EXPERT_CONFIGS = {
     'tweets': create_tweets_expert_config, # 保留原版本，兼容旧代码
     'graph': create_graph_expert_config,
     'cat': create_cat_expert_config,      # 类别属性专家 (MoE 版本)
+    'num': create_num_expert_config,      # 数值属性专家 (MoE 版本)
 }
 
 # 获取专家配置

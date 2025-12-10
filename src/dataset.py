@@ -116,80 +116,81 @@ class Twibot20(Dataset):
 
     def num_prop_preprocess(self):
         print('开始处理数值类metadata', end='   ')
-        path0 = os.path.join('../../autodl-fs/pt_data', 'num_properties_tensor.pt')
+        path0 = os.path.join('../../autodl-fs/pt_data', 'num_properties_labeled_tensor.pt')
         if not os.path.exists(path0):
-            if not os.path.exists(os.path.join('../../autodl-fs/pt_data', "followers_count.pt")):
+            if not os.path.exists(os.path.join('../../autodl-fs/pt_data', "followers_count_labeled.pt")):
                 followers_count = []
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['followers_count'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['followers_count'] is None:
                         followers_count.append(0)
                     else:
-                        followers_count.append(self.df_data['profile'][i]['followers_count'])
+                        followers_count.append(self.df_data_labeled['profile'][i]['followers_count'])
                 followers_count = torch.tensor(np.array(followers_count, dtype=np.float32)).to(self.device)
                 if self.save:
                     os.makedirs('../../autodl-fs/pt_data', exist_ok=True)
-                    torch.save(followers_count, os.path.join('../../autodl-fs/pt_data', "followers_count.pt"))
+                    torch.save(followers_count, os.path.join('../../autodl-fs/pt_data', "followers_count_labeled.pt"))
 
                 friends_count = []
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['friends_count'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['friends_count'] is None:
                         friends_count.append(0)
                     else:
-                        friends_count.append(self.df_data['profile'][i]['friends_count'])
+                        friends_count.append(self.df_data_labeled['profile'][i]['friends_count'])
                 friends_count = torch.tensor(np.array(friends_count, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(friends_count, os.path.join('../../autodl-fs/pt_data', 'friends_count.pt'))
+                    torch.save(friends_count, os.path.join('../../autodl-fs/pt_data', 'friends_count_labeled.pt'))
 
                 screen_name_length = []
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['screen_name'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['screen_name'] is None:
                         screen_name_length.append(0)
                     else:
-                        screen_name_length.append(len(self.df_data['profile'][i]['screen_name']))
+                        screen_name_length.append(len(self.df_data_labeled['profile'][i]['screen_name']))
                 screen_name_length = torch.tensor(np.array(screen_name_length, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(screen_name_length, os.path.join('../../autodl-fs/pt_data', 'screen_name_length.pt'))
+                    torch.save(screen_name_length, os.path.join('../../autodl-fs/pt_data', 'screen_name_length_labeled.pt'))
 
                 favourites_count = []
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['favourites_count'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['favourites_count'] is None:
                         favourites_count.append(0)
                     else:
-                        favourites_count.append(self.df_data['profile'][i]['favourites_count'])
+                        favourites_count.append(self.df_data_labeled['profile'][i]['favourites_count'])
                 favourites_count = torch.tensor(np.array(favourites_count, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(favourites_count, os.path.join('../../autodl-fs/pt_data', 'favourites_count.pt'))
+                    torch.save(favourites_count, os.path.join('../../autodl-fs/pt_data', 'favourites_count_labeled.pt'))
 
                 active_days = []
                 date0 = dt.strptime('Tue Sep 1 00:00:00 +0000 2020 ', '%a %b %d %X %z %Y ')
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['created_at'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['created_at'] is None:
                         active_days.append(0)
                     else:
-                        date = dt.strptime(self.df_data['profile'][i]['created_at'], '%a %b %d %X %z %Y ')
+                        date = dt.strptime(self.df_data_labeled['profile'][i]['created_at'], '%a %b %d %X %z %Y ')
                         active_days.append((date0 - date).days)
                 active_days = torch.tensor(np.array(active_days, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(active_days, os.path.join('../../autodl-fs/pt_data', 'active_days.pt'))
+                    torch.save(active_days, os.path.join('../../autodl-fs/pt_data', 'active_days_labeled.pt'))
 
                 statuses_count = []
-                for i in range(self.df_data.shape[0]):
-                    if self.df_data['profile'][i] is None or self.df_data['profile'][i]['statuses_count'] is None:
+                for i in range(self.df_data_labeled.shape[0]):
+                    if self.df_data_labeled['profile'][i] is None or self.df_data_labeled['profile'][i]['statuses_count'] is None:
                         statuses_count.append(0)
                     else:
-                        statuses_count.append(int(self.df_data['profile'][i]['statuses_count']))
+                        statuses_count.append(int(self.df_data_labeled['profile'][i]['statuses_count']))
                 statuses_count = torch.tensor(np.array(statuses_count, dtype=np.float32)).to(self.device)
                 if self.save:
-                    torch.save(statuses_count, os.path.join('../../autodl-fs/pt_data', 'statuses_count.pt'))
+                    torch.save(statuses_count, os.path.join('../../autodl-fs/pt_data', 'statuses_count_labeled.pt'))
 
             else:
-                active_days = torch.load(os.path.join('../../autodl-fs/pt_data', "active_days.pt"))
-                screen_name_length = torch.load(os.path.join('../../autodl-fs/pt_data', "screen_name_length.pt"))
-                favourites_count = torch.load(os.path.join('../../autodl-fs/pt_data', "favourites_count.pt"))
-                followers_count = torch.load(os.path.join('../../autodl-fs/pt_data', "followers_count.pt"))
-                friends_count = torch.load(os.path.join('../../autodl-fs/pt_data', "friends_count.pt"))
-                statuses_count = torch.load(os.path.join('../../autodl-fs/pt_data', "statuses_count.pt"))
+                active_days = torch.load(os.path.join('../../autodl-fs/pt_data', "active_days_labeled.pt"))
+                screen_name_length = torch.load(os.path.join('../../autodl-fs/pt_data', "screen_name_length_labeled.pt"))
+                favourites_count = torch.load(os.path.join('../../autodl-fs/pt_data', "favourites_count_labeled.pt"))
+                followers_count = torch.load(os.path.join('../../autodl-fs/pt_data', "followers_count_labeled.pt"))
+                friends_count = torch.load(os.path.join('../../autodl-fs/pt_data', "friends_count_labeled.pt"))
+                statuses_count = torch.load(os.path.join('../../autodl-fs/pt_data', "statuses_count_labeled.pt"))
 
+            # Z-score 标准化
             active_days = pd.Series(active_days.to('cpu').detach().numpy())
             active_days = (active_days - active_days.mean()) / active_days.std()
             active_days = torch.tensor(np.array(active_days))
@@ -214,17 +215,22 @@ class Twibot20(Dataset):
             statuses_count = (statuses_count - statuses_count.mean()) / statuses_count.std()
             statuses_count = torch.tensor(np.array(statuses_count))
 
-            num_prop = torch.cat((followers_count.reshape([229580, 1]), friends_count.reshape([229580, 1]),
-                                  favourites_count.reshape([229580, 1]), statuses_count.reshape([229580, 1]),
-                                  screen_name_length_days.reshape([229580, 1]), active_days.reshape([229580, 1])),
+            # 拼接所有数值特征 - 使用实际数据长度而不是硬编码
+            num_samples = len(followers_count)
+            num_prop = torch.cat((followers_count.reshape([num_samples, 1]),
+                                  friends_count.reshape([num_samples, 1]),
+                                  favourites_count.reshape([num_samples, 1]),
+                                  statuses_count.reshape([num_samples, 1]),
+                                  screen_name_length_days.reshape([num_samples, 1]),
+                                  active_days.reshape([num_samples, 1])),
                                  1).to(self.device)
 
             if self.save:
                 os.makedirs('../../autodl-fs/pt_data', exist_ok=True)
-                torch.save(num_prop, os.path.join('../../autodl-fs/pt_data', "num_properties_tensor.pt"))
+                torch.save(num_prop, os.path.join('../../autodl-fs/pt_data', "num_properties_labeled_tensor.pt"))
 
         else:
-            num_prop = torch.load(os.path.join('../../autodl-fs/pt_data', "num_properties_tensor.pt")).to(self.device)
+            num_prop = torch.load(os.path.join('../../autodl-fs/pt_data', "num_properties_labeled_tensor.pt")).to(self.device)
         print('Finished')
         return num_prop
 

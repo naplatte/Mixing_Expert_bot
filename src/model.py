@@ -570,15 +570,15 @@ class CatExpert(nn.Module):
         1. 输入: 类别属性的 one-hot 向量（已经是二进制形式）[batch_size, num_cat_features]
         2. 两层 MLP 学习低维表示
         3. Leaky ReLU 激活函数进行非线性变换
-        4. MoE 层 (Gating + 4个MLP专家, Top-2选择)
+        4. MoE 层 (Gating + 3个MLP专家, Top-1选择)
         5. 输出 64 维专家表示 + bot 概率
     """
     def __init__(self,
                  input_dim=11,    # 类别属性数量（11个布尔属性）
                  hidden_dim=64,   # 两层MLP的隐藏层维度
                  expert_dim=64,   # 专家输出维度
-                 num_experts=4,   # MoE 中的专家数量（默认4个）
-                 top_k=2,         # 每次选择的专家数量（默认Top-2）
+                 num_experts=3,   # MoE 中的专家数量（默认3个）
+                 top_k=1,         # 每次选择的专家数量（默认Top-1）
                  dropout=0.2,
                  device='cuda'):
 
@@ -768,6 +768,220 @@ class CatExpert(nn.Module):
         stats = self.get_expert_usage_stats()
         print(f"\n{'='*60}")
         print(f"Cat Expert 专家使用统计 (Top-{self.top_k} 选择)")
+        print(f"{'='*60}")
+        print(f"总样本数: {stats['total_samples']}")
+        print(f"{'专家':<10} {'使用次数':<15} {'使用率':<15}")
+        print(f"{'-'*60}")
+        for i in range(self.num_experts):
+            print(f"Expert {i+1:<3} {stats['expert_counts'][i]:<15} {stats['expert_rates'][i]:<14.2f}%")
+        print(f"{'='*60}\n")
+
+
+# ==================== Numerical Property Expert (MoE 版本) ====================
+
+class NumExpert(nn.Module):
+    """
+    Numerical Property Expert with Mixture of Experts (MoE) - Top-K 版本
+    处理用户的数值型元数据（如 followers_count, friends_count, statuses_count 等）
+
+    嵌入方式:
+        1. 输入: 数值属性向量 [batch_size, num_features] （已经过 z-score 标准化）
+        2. 全连接层学习低维表示（线性变换）
+        3. Leaky ReLU 激活函数进行非线性变换
+        4. MoE 层 (Gating + 3个MLP专家, Top-1选择)
+        5. 输出 64 维专家表示 + bot 概率
+    """
+    def __init__(self,
+                 input_dim=6,     # 数值属性数量（6个数值特征）
+                 hidden_dim=64,   # 全连接层的隐藏层维度
+                 expert_dim=64,   # 专家输出维度
+                 num_experts=3,   # MoE 中的专家数量（默认3个）
+                 top_k=1,         # 每次选择的专家数量（默认Top-1）
+                 dropout=0.2,
+                 device='cuda'):
+
+        super(NumExpert, self).__init__()
+
+        # 确定实际使用的设备
+        self.device = device if device == 'cuda' and torch.cuda.is_available() else 'cpu'
+        self.num_experts = num_experts
+        self.top_k = min(top_k, num_experts)  # 确保 top_k 不超过专家数量
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.expert_dim = expert_dim
+
+        # 专家使用统计
+        self.register_buffer('expert_usage_count', torch.zeros(num_experts, dtype=torch.long))
+        self.register_buffer('total_samples', torch.zeros(1, dtype=torch.long))
+
+        # ========== 全连接层学习低维表示 ==========
+        # 输入: z-score 标准化后的数值属性向量
+        # 使用 Leaky ReLU 激活函数
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Dropout(dropout)
+        ).to(self.device)
+
+        # ========== Gating Network ==========
+        # 输入: hidden_dim 维特征，输出: num_experts 个专家的权重
+        self.gating_network = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.LayerNorm(128),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.LayerNorm(64),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_experts)  # 输出每个专家的 logit
+        ).to(self.device)
+
+        # ========== Expert Networks (MLP 专家) ==========
+        # 每个专家都是一个 3 层 MLP: hidden_dim → 128 → 64 → expert_dim
+        self.experts = nn.ModuleList()
+        for _ in range(num_experts):
+            expert_mlp = nn.Sequential(
+                nn.Linear(hidden_dim, 128),
+                nn.LayerNorm(128),
+                nn.LeakyReLU(negative_slope=0.01),
+                nn.Dropout(dropout),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.LeakyReLU(negative_slope=0.01),
+                nn.Dropout(dropout),
+                nn.Linear(64, expert_dim)
+            )
+            self.experts.append(expert_mlp.to(self.device))
+
+        # ========== 分类头 ==========
+        # 增强的分类头: expert_dim → 64 → 32 → 1（带 LayerNorm）
+        self.bot_classifier = nn.Sequential(
+            nn.Linear(expert_dim, 64),
+            nn.LayerNorm(64),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid()  # 输出 bot 概率
+        ).to(self.device)
+
+    def forward(self, num_features, return_gating_weights=False, return_expert_indices=False):
+        """
+        Args:
+            num_features: [batch_size, input_dim] - 数值属性向量（已标准化）
+                - 例如: [batch_size, 6] 对于6个数值特征
+            return_gating_weights: bool - 是否返回 gating 权重
+            return_expert_indices: bool - 是否返回选中的专家索引
+
+        Returns:
+            expert_repr: [batch_size, expert_dim] - 聚合后的专家表示
+            bot_prob: [batch_size, 1] - bot 概率
+            gating_weights: [batch_size, num_experts] - (可选) 各专家权重
+            expert_indices: [batch_size, top_k] - (可选) 选中的专家索引
+        """
+        batch_size = num_features.size(0)
+        device = num_features.device
+
+        # Step 1: 全连接层 + Leaky ReLU 提取特征
+        encoded_features = self.feature_encoder(num_features)  # [batch_size, hidden_dim]
+
+        # Step 2: Gating Network 计算专家权重
+        gating_logits = self.gating_network(encoded_features)  # [batch_size, num_experts]
+        gating_weights = F.softmax(gating_logits, dim=-1)  # [batch_size, num_experts]
+
+        # Step 3: Top-K 选择专家
+        topk_weights, topk_indices = torch.topk(gating_weights, self.top_k, dim=-1)
+        # topk_weights: [batch_size, top_k]
+        # topk_indices: [batch_size, top_k]
+
+        # 重新归一化 top-k 权重
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)  # [batch_size, top_k]
+
+        # 统计专家使用次数
+        if self.training or not return_gating_weights:
+            with torch.no_grad():
+                for i in range(batch_size):
+                    for expert_idx in topk_indices[i]:
+                        self.expert_usage_count[expert_idx] += 1
+                self.total_samples += batch_size
+
+        # Step 4: 所有专家处理输入
+        expert_outputs = []
+        for expert in self.experts:
+            expert_out = expert(encoded_features)  # [batch_size, expert_dim]
+            expert_outputs.append(expert_out)
+
+        # Stack: [batch_size, num_experts, expert_dim]
+        expert_outputs = torch.stack(expert_outputs, dim=1)
+
+        # Step 5: Top-K 加权聚合
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.top_k)
+        selected_expert_outputs = expert_outputs[batch_indices, topk_indices]  # [batch_size, top_k, expert_dim]
+
+        # 加权求和
+        topk_weights_expanded = topk_weights.unsqueeze(-1)  # [batch_size, top_k, 1]
+        expert_repr = (selected_expert_outputs * topk_weights_expanded).sum(dim=1)  # [batch_size, expert_dim]
+
+        # Step 6: Bot Probability 预测
+        bot_prob = self.bot_classifier(expert_repr)  # [batch_size, 1]
+
+        # 返回结果
+        results = [expert_repr, bot_prob]
+        if return_gating_weights:
+            results.append(gating_weights)
+        if return_expert_indices:
+            results.append(topk_indices)
+
+        if len(results) == 2:
+            return expert_repr, bot_prob
+        elif len(results) == 3:
+            return tuple(results)
+        else:
+            return tuple(results)
+
+    def get_expert_repr(self, num_features):
+        """只获取专家表示"""
+        expert_repr, _ = self.forward(num_features)
+        return expert_repr
+
+    def get_gating_weights(self, num_features):
+        """获取 gating 权重"""
+        return self.forward(num_features, return_gating_weights=True)[2]
+
+    def get_expert_usage_stats(self):
+        """获取专家使用统计信息"""
+        total = self.total_samples.item()
+        if total == 0:
+            return {
+                'total_samples': 0,
+                'expert_counts': [0] * self.num_experts,
+                'expert_rates': [0.0] * self.num_experts
+            }
+
+        counts = self.expert_usage_count.cpu().tolist()
+        rates = [count / total * 100 for count in counts]
+
+        return {
+            'total_samples': total,
+            'expert_counts': counts,
+            'expert_rates': rates
+        }
+
+    def reset_expert_usage_stats(self):
+        """重置专家使用统计"""
+        self.expert_usage_count.zero_()
+        self.total_samples.zero_()
+
+    def print_expert_usage_stats(self):
+        """打印专家使用统计信息"""
+        stats = self.get_expert_usage_stats()
+        print(f"\n{'='*60}")
+        print(f"Num Expert 专家使用统计 (Top-{self.top_k} 选择)")
         print(f"{'='*60}")
         print(f"总样本数: {stats['total_samples']}")
         print(f"{'专家':<10} {'使用次数':<15} {'使用率':<15}")

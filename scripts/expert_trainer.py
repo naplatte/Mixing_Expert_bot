@@ -402,9 +402,9 @@ class ExpertTrainer:
         print(f"  ✓ 保存最终模型: {self.checkpoint_dir / f'{self.name}_expert_final.pt'}")
         print(f"  ✓ 最优模型路径: {self.checkpoint_dir / f'{self.name}_expert_best.pt'}")
 
-        # 如果是 MoE 模型（DesExpertMoE, PostExpert 或 CatExpert），打印专家使用统计
-        from src.model import DesExpertMoE, PostExpert, CatExpert
-        if isinstance(self.model, (DesExpertMoE, PostExpert, CatExpert)):
+        # 如果是 MoE 模型（DesExpertMoE, PostExpert, CatExpert 或 NumExpert），打印专家使用统计
+        from src.model import DesExpertMoE, PostExpert, CatExpert, NumExpert
+        if isinstance(self.model, (DesExpertMoE, PostExpert, CatExpert, NumExpert)):
             self.model.print_expert_usage_stats()
 
         # 保存特征嵌入
