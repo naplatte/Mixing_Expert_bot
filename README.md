@@ -5,7 +5,7 @@ python train_experts.py --expert all
 python train_experts.py --expert des
 
 
-python train_experts.py --expert tweets
+python train_experts.py --expert post
 
 python train_experts.py --expert graph
 

@@ -393,9 +393,18 @@ class ExpertTrainer:
         print(f"  F1 Score: {test_metrics['f1']:.4f}")
         print(f"{'='*60}\n")
         
-        # 如果是 DesExpertMoE 模型，打印专家使用统计
-        from src.model import DesExpertMoE
-        if isinstance(self.model, DesExpertMoE):
+        # 保存最终模型（训练结束时的模型状态）
+        self.save_checkpoint('final', epoch, {
+            'test_loss': test_metrics['loss'],
+            'test_acc': test_metrics['acc'],
+            'test_f1': test_metrics['f1']
+        })
+        print(f"  ✓ 保存最终模型: {self.checkpoint_dir / f'{self.name}_expert_final.pt'}")
+        print(f"  ✓ 最优模型路径: {self.checkpoint_dir / f'{self.name}_expert_best.pt'}")
+
+        # 如果是 MoE 模型（DesExpertMoE, PostExpert 或 CatExpert），打印专家使用统计
+        from src.model import DesExpertMoE, PostExpert, CatExpert
+        if isinstance(self.model, (DesExpertMoE, PostExpert, CatExpert)):
             self.model.print_expert_usage_stats()
 
         # 保存特征嵌入

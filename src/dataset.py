@@ -229,24 +229,25 @@ class Twibot20(Dataset):
         return num_prop
 
     def cat_prop_preprocess(self):
+        """处理类别型元数据（仅带标签数据）"""
         print('开始处理类别类metadata', end='   ')
-        path = os.path.join('../../autodl-fs/pt_data', 'cat_properties_tensor.pt')
+        path = os.path.join('../../autodl-fs/pt_data', 'cat_properties_labeled_tensor.pt')
         if not os.path.exists(path):
             category_properties = []
             properties = ['protected', 'geo_enabled', 'verified', 'contributors_enabled', 'is_translator',
                           'is_translation_enabled', 'profile_background_tile', 'profile_use_background_image',
                           'has_extended_profile', 'default_profile', 'default_profile_image']
-            for i in range(self.df_data.shape[0]):
+            for i in range(self.df_data_labeled.shape[0]):
                 prop = []
-                if self.df_data['profile'][i] is None:
-                    for i in range(11):
+                if self.df_data_labeled['profile'][i] is None:
+                    for j in range(11):
                         prop.append(0)
                 else:
                     for each in properties:
-                        if self.df_data['profile'][i][each] is None:
+                        if self.df_data_labeled['profile'][i][each] is None:
                             prop.append(0)
                         else:
-                            if self.df_data['profile'][i][each] == "True ":
+                            if self.df_data_labeled['profile'][i][each] == "True ":
                                 prop.append(1)
                             else:
                                 prop.append(0)
@@ -255,9 +256,9 @@ class Twibot20(Dataset):
             category_properties = torch.tensor(np.array(category_properties, dtype=np.float32)).to(self.device)
             if self.save:
                 os.makedirs('../../autodl-fs/pt_data', exist_ok=True)
-                torch.save(category_properties, os.path.join('../../autodl-fs/pt_data', 'cat_properties_tensor.pt'))
+                torch.save(category_properties, path)
         else:
-            category_properties = torch.load(os.path.join('../../autodl-fs/pt_data', "cat_properties_tensor.pt")).to(self.device)
+            category_properties = torch.load(path).to(self.device)
         print('Finished')
         return category_properties
 
@@ -313,56 +314,4 @@ class Twibot20(Dataset):
         val_idx = range(8278,8278 + 2365)
         test_idx = range(8278+2365,8278+2365+1183)
         return train_idx,val_idx,test_idx
-
-
-# def create_dataloader(root='./processed_data', device='cuda', process=True, save=True,
-#                       use_mlp=True, output_dim=64, hidden_dim=512):
-#     print('开始数据预处理...')
-#
-#     # 初始化数据集
-#     print('\n[1/8] 初始化 Twibot20 数据集...')
-#     dataset = Twibot20(root=root, device=device, process=process, save=save)
-#
-#
-#     # 生成简介嵌入特征
-#     print('\n[4/8] 生成简介嵌入特征...')
-#     des_features = dataset.Des_embbeding(use_mlp=use_mlp, output_dim=output_dim, hidden_dim=hidden_dim)
-#     print(f'✓ 简介嵌入特征生成完成，形状: {des_features.shape}')
-#
-#     # 生成推文嵌入特征
-#     print('\n[6/8] 生成推文嵌入特征...')
-#     tweets_features = dataset.tweets_embedding(use_mlp=use_mlp, output_dim=output_dim, hidden_dim=hidden_dim)
-#     print(f'✓ 推文嵌入特征生成完成，形状: {tweets_features.shape}')
-#
-#
-#     # 保存数据集信息摘要
-#     if save:
-#         print('\n保存数据集信息摘要...')
-#         summary = {
-#             'des_feature_dim': des_features.shape[1] if len(des_features.shape) > 1 else des_features.shape[0],
-#             'tweets_feature_dim': tweets_features.shape[1] if len(tweets_features.shape) > 1 else tweets_features.shape[0],
-#             'use_mlp': use_mlp,
-#             'output_dim': output_dim if use_mlp else 1024,
-#             'device': device,
-#             'created_at': dt.now().strftime('%Y-%m-%d %H:%M:%S')
-#         }
-#         summary_path = os.path.join(root, 'dataset_summary.json')
-#         with open(summary_path, 'w', encoding='utf-8') as f:
-#             json.dump(summary, f, indent=4, ensure_ascii=False)
-#         print(f'✓ 数据集摘要已保存至: {summary_path}')
-#
-#
-# if __name__ == '__main__':
-#     # 当直接运行此脚本时，执行数据加载
-#     print('直接运行 dataset.py，开始加载和处理数据...\n')
-#
-#     # 可以根据需要修改参数
-#     data = create_dataloader(
-#         root='./processed_data',
-#         device='cuda',  # 如果没有GPU，改为 'cpu'
-#         process=True,   # 如果已经处理过数据，可以设为 False
-#         save=True
-#     )
-
-
 

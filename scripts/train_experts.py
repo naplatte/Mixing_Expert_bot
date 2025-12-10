@@ -44,7 +44,7 @@ def check_expert_dependencies(expert_name, checkpoint_dir):
     """
     # 定义专家依赖关系
     dependencies = {
-        'graph': ['des', 'tweets'],  # 图专家依赖 des 和 tweets
+        'graph': ['des', 'post'],  # 图专家依赖 des 和 post
     }
 
     if expert_name not in dependencies:
@@ -82,7 +82,7 @@ def train_all_experts(config_params, num_epochs=10, experts=None, save_embedding
     """
     # 默认训练的专家列表（按依赖顺序）
     if experts is None:
-        experts = ['des', 'tweets', 'graph']  # graph 依赖 des 和 tweets，所以放最后
+        experts = ['des', 'post', 'cat', 'graph']  # graph 依赖 des 和 post，所以放最后
 
     results = {}
 
@@ -143,7 +143,7 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练社交机器人检测专家模型')
     parser.add_argument('--expert', type=str, default='all',
-                        help='要训练的专家 (des, tweets, graph, all)')
+                        help='要训练的专家 (des, post, tweets, cat, graph, all)')
     parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
     parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-fs/model',
@@ -157,17 +157,15 @@ def main():
     parser.add_argument('--device', type=str, default=None,
                         help='设备 (cuda 或 cpu)')
 
-    # des和tweets Expert 参数
-    parser.add_argument('--bert_model', type=str, default='bert-base-uncased',
-                        help='BERT模型名称 (用于Description Expert)')
-    parser.add_argument('--roberta_model', type=str, default='distilroberta-base',
-                        help='RoBERTa模型名称 (用于Tweets Expert)')
-    parser.add_argument('--freeze_bert', action='store_true', default=True,
-                        help='是否冻结BERT参数 (仅训练MLP)')
+    # Des Expert 和 Post Expert MoE 参数
     parser.add_argument('--num_experts', type=int, default=4,
-                        help='Description Expert MoE 中的专家数量 (默认4)')
+                        help='Des/Post Expert MoE 中的专家数量 (默认4)')
     parser.add_argument('--top_k', type=int, default=2,
-                        help='Description Expert MoE Top-K 选择数量 (默认2)')
+                        help='Des/Post Expert MoE Top-K 选择数量 (默认2)')
+
+    # 旧版 Tweets Expert 参数 (保留兼容)
+    parser.add_argument('--roberta_model', type=str, default='distilroberta-base',
+                        help='RoBERTa模型名称 (用于旧版 Tweets Expert)')
 
     # Graph Expert 参数
     parser.add_argument('--graph_hidden_dim', type=int, default=128,
@@ -176,7 +174,7 @@ def main():
                         help='图专家RGCN层数')
     parser.add_argument('--graph_dropout', type=float, default=0.3,
                         help='图专家Dropout比率')
-    parser.add_argument('--graph_expert_names', type=str, default='des,tweets',
+    parser.add_argument('--graph_expert_names', type=str, default='des,post',
                         help='图专家依赖的专家列表（逗号分隔）')
 
     # 特征嵌入保存参数
@@ -204,12 +202,11 @@ def main():
         'batch_size': args.batch_size,
         'device': device,
         'checkpoint_dir': args.checkpoint_dir,
-        # Text Expert 参数
-        'bert_model_name': args.bert_model,
+        # Des/Post Expert MoE 参数
+        'num_experts': args.num_experts,
+        'top_k': args.top_k,
+        # 旧版 Tweets Expert 参数 (兼容)
         'roberta_model_name': args.roberta_model,
-        'freeze_bert': args.freeze_bert,
-        'num_experts': args.num_experts,  # Description Expert MoE 专家数量
-        'top_k': args.top_k,  # Description Expert MoE Top-K 选择
         # Graph Expert 参数
         'hidden_dim': args.graph_hidden_dim,
         'num_layers': args.graph_num_layers,

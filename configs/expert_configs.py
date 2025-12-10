@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import Twibot20
-from src.model import DesExpert, DesExpertMoE, TweetsExpert, GraphExpert
+from src.model import DesExpert, DesExpertMoE, TweetsExpert, PostExpert, GraphExpert, CatExpert
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -319,7 +319,220 @@ def create_des_expert_config(
     }
 
 
-# ==================== Tweets Expert ====================
+# ==================== Post Expert (MoE 版本，替代 Tweets Expert) ====================
+
+class PostDataset(Dataset):
+    """Post Expert 数据集"""
+    def __init__(self, posts_list, labels, mode='train'):
+        """
+        Args:
+            posts_list: 推文列表
+            labels: 标签列表
+            mode: 'train' | 'val' | 'test'
+                  所有阶段都过滤掉没有推文的样本
+        """
+        self.mode = mode
+
+        # 所有阶段都过滤掉没有推文的样本
+        valid_indices = []
+        for idx, user_posts in enumerate(posts_list):
+            cleaned = self._clean_posts(user_posts)
+            if len(cleaned) > 0:
+                valid_indices.append(idx)
+
+        self.posts_list = [posts_list[i] for i in valid_indices]
+        self.labels = [labels[i] for i in valid_indices]
+
+        filtered_count = len(posts_list) - len(self.posts_list)
+        print(f"  [{mode}集] 有效样本: {len(self.posts_list)}/{len(posts_list)} (过滤 {filtered_count} 个无推文样本)")
+
+    def _clean_posts(self, user_posts):
+        """清理推文文本"""
+        cleaned = []
+        if isinstance(user_posts, list):
+            for post in user_posts:
+                post_str = str(post).strip()
+                if post_str != '' and post_str.lower() != 'none':
+                    cleaned.append(post_str)
+        return cleaned
+
+    def __len__(self):
+        return len(self.posts_list)
+
+    def __getitem__(self, idx):
+        user_posts = self.posts_list[idx]
+        label = self.labels[idx]
+
+        # 清理推文文本（保证非空）
+        cleaned_posts = self._clean_posts(user_posts)
+
+        return {
+            'posts_text': cleaned_posts,
+            'label': torch.tensor(label, dtype=torch.float32)
+        }
+
+
+def collate_posts_fn(batch):
+    """将一个 batch 中每个样本的推文文本列表和标签整理成字典供模型输入"""
+    posts_text_lists = [item['posts_text'] for item in batch]
+    labels = torch.stack([item['label'] for item in batch])
+
+    return {
+        'posts_text_list': posts_text_lists,
+        'label': labels
+    }
+
+
+def create_post_expert_config(
+    dataset_path=None,
+    batch_size=32,
+    learning_rate=5e-4,
+    weight_decay=0.01,
+    device='cuda',
+    checkpoint_dir='../../autodl-fs/model',
+    model_name='microsoft/deberta-v3-base',
+    max_grad_norm=1.0,
+    dropout=0.3,
+    early_stopping_patience=4,
+    num_experts=4,  # MoE 中的专家数量（默认4个）
+    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
+    twibot_dataset=None
+):
+    """
+    创建 Post Expert 配置 (使用 DeBERTa-v3-base + MoE + Top-K)
+
+    Args:
+        model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
+        batch_size: 批次大小，默认32
+        learning_rate: 学习率，默认5e-4
+        weight_decay: 权重衰减，默认0.01
+        dropout: Dropout率，默认0.3
+        max_grad_norm: 梯度裁剪阈值，默认1.0
+        early_stopping_patience: 早停耐心值，默认4
+        num_experts: MoE 中的专家数量，默认4
+        top_k: 每次选择的专家数量（Top-K），默认2
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+
+    Returns:
+        dict: 包含模型、数据加载器、优化器等的配置字典
+    """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
+    print(f"\n{'='*60}")
+    print(f"配置 Post Expert with MoE + Top-K (DeBERTa-v3-base)")
+    print(f"{'='*60}")
+    print(f"  模型: {model_name}")
+    print(f"  专家数量: {num_experts}")
+    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
+    print(f"  批次大小: {batch_size}")
+    print(f"  学习率: {learning_rate}")
+    print(f"  权重衰减: {weight_decay}")
+    print(f"  Dropout: {dropout}")
+    print(f"  梯度裁剪: {max_grad_norm}")
+    print(f"  早停耐心值: {early_stopping_patience}")
+
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("加载数据...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("使用预加载的数据集...")
+
+    posts_list = twibot_dataset.tweets_preprogress()  # 复用原有的推文加载方法
+    labels = twibot_dataset.load_labels()
+
+    if isinstance(posts_list, np.ndarray):
+        posts_list = posts_list.tolist()
+    labels = labels.cpu().numpy()
+
+    # 获取训练/验证/测试集索引
+    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
+    train_idx = list(train_idx)
+    val_idx = list(val_idx)
+    test_idx = list(test_idx)
+
+    # 划分数据集
+    train_posts = [posts_list[i] for i in train_idx]
+    train_labels = labels[train_idx]
+
+    val_posts = [posts_list[i] for i in val_idx]
+    val_labels = labels[val_idx]
+
+    test_posts = [posts_list[i] for i in test_idx]
+    test_labels = labels[test_idx]
+
+    print(f"  训练集: {len(train_posts)} 样本")
+    print(f"  验证集: {len(val_posts)} 样本")
+    print(f"  测试集: {len(test_posts)} 样本")
+
+    # 统计推文数量
+    train_post_counts = [len(posts) if isinstance(posts, list) else 0 for posts in train_posts]
+    print(f"  训练集平均推文数: {np.mean(train_post_counts):.2f}")
+
+    # 创建数据集和数据加载器
+    print("创建数据加载器...")
+    train_dataset = PostDataset(train_posts, train_labels, mode='train')
+    val_dataset = PostDataset(val_posts, val_labels, mode='val')
+    test_dataset = PostDataset(test_posts, test_labels, mode='test')
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_posts_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
+
+    # 初始化模型 (使用 MoE + Top-K 版本)
+    print("初始化 MoE + Top-K 模型...")
+    model = PostExpert(
+        model_name=model_name,
+        device=device,
+        dropout=dropout,
+        num_experts=num_experts,
+        top_k=top_k,
+        expert_dim=64,
+        hidden_dim=768
+    ).to(device)
+    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
+
+    # 优化器和损失函数 - 使用权重衰减
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
+    criterion = nn.BCELoss()
+
+    # 数据提取函数
+    def extract_fn(batch, device):
+        posts_text_list = batch['posts_text_list']
+        labels = batch['label'].to(device).unsqueeze(1)
+        return (posts_text_list,), labels
+
+    return {
+        'name': 'post',
+        'model': model,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'optimizer': optimizer,
+        'criterion': criterion,
+        'device': device,
+        'checkpoint_dir': checkpoint_dir,
+        'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,
+        'early_stopping_patience': early_stopping_patience,
+        'batch_size': batch_size,
+        'learning_rate': learning_rate,
+        'dropout': dropout,
+        'num_experts': num_experts,
+        'top_k': top_k
+    }
+
+
+# ==================== Tweets Expert (保留原版本，兼容旧代码) ====================
 
 class TweetsDataset(Dataset):
     def __init__(self, tweets_list, labels, mode='train'):
@@ -717,12 +930,216 @@ def create_graph_expert_config(
     }
 
 
+# ==================== Cat Expert (类别属性专家 MoE 版本) ====================
+
+class CatDataset(Dataset):
+    """Category Property Expert 数据集"""
+    def __init__(self, cat_features, labels, mode='train'):
+        """
+        Args:
+            cat_features: 类别属性张量 [num_samples, num_cat_features]
+            labels: 标签列表
+            mode: 'train' | 'val' | 'test'
+        """
+        self.mode = mode
+        self.cat_features = cat_features
+        self.labels = labels
+
+        # 检查是否有全零行（可能表示缺失数据）
+        if isinstance(cat_features, torch.Tensor):
+            zero_rows = (cat_features.sum(dim=1) == 0).sum().item()
+        else:
+            zero_rows = (np.sum(cat_features, axis=1) == 0).sum()
+
+        print(f"  [{mode}集] 有效样本: {len(self.labels)} (全零特征样本: {zero_rows})")
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        cat_feat = self.cat_features[idx]
+        label = self.labels[idx]
+
+        # 确保返回tensor
+        if not isinstance(cat_feat, torch.Tensor):
+            cat_feat = torch.tensor(cat_feat, dtype=torch.float32)
+        if not isinstance(label, torch.Tensor):
+            label = torch.tensor(label, dtype=torch.float32)
+
+        return {
+            'cat_features': cat_feat,
+            'label': label
+        }
+
+
+def create_cat_expert_config(
+    dataset_path=None,
+    batch_size=64,
+    learning_rate=1e-3,
+    weight_decay=0.01,
+    device='cuda',
+    checkpoint_dir='../../autodl-fs/model',
+    max_grad_norm=1.0,
+    dropout=0.2,
+    early_stopping_patience=5,
+    num_experts=4,  # MoE 中的专家数量（默认4个）
+    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
+    hidden_dim=64,  # 两层MLP隐藏层维度
+    expert_dim=64,  # 专家输出维度
+    twibot_dataset=None
+):
+    """
+    创建 Category Property Expert 配置 (MoE + Top-K)
+
+    类别属性包括:
+        - protected, geo_enabled, verified, contributors_enabled
+        - is_translator, is_translation_enabled, profile_background_tile
+        - profile_use_background_image, has_extended_profile
+        - default_profile, default_profile_image
+
+    Args:
+        dataset_path: 数据集路径
+        batch_size: 批次大小，默认64
+        learning_rate: 学习率，默认1e-3
+        weight_decay: 权重衰减，默认0.01
+        dropout: Dropout率，默认0.2
+        max_grad_norm: 梯度裁剪阈值，默认1.0
+        early_stopping_patience: 早停耐心值，默认5
+        num_experts: MoE 中的专家数量，默认4
+        top_k: 每次选择的专家数量（Top-K），默认2
+        hidden_dim: 两层MLP隐藏层维度，默认64
+        expert_dim: 专家输出维度，默认64
+        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+
+    Returns:
+        dict: 包含模型、数据加载器、优化器等的配置字典
+    """
+    if dataset_path is None:
+        dataset_path = str(PROJECT_ROOT / 'processed_data')
+
+    print(f"\n{'='*60}")
+    print(f"配置 Category Property Expert with MoE + Top-K")
+    print(f"{'='*60}")
+    print(f"  专家数量: {num_experts}")
+    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
+    print(f"  批次大小: {batch_size}")
+    print(f"  学习率: {learning_rate}")
+    print(f"  权重衰减: {weight_decay}")
+    print(f"  Dropout: {dropout}")
+    print(f"  梯度裁剪: {max_grad_norm}")
+    print(f"  早停耐心值: {early_stopping_patience}")
+
+    # 加载数据（如果没有预加载）
+    if twibot_dataset is None:
+        print("加载数据...")
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+    else:
+        print("使用预加载的数据集...")
+
+    # 加载类别属性数据
+    cat_features = twibot_dataset.cat_prop_preprocess()  # [num_samples, 11]
+    labels = twibot_dataset.load_labels()
+
+    # 转换为CPU tensor/numpy
+    if isinstance(cat_features, torch.Tensor):
+        cat_features = cat_features.cpu()
+    labels = labels.cpu().numpy()
+
+    # 获取输入维度（类别属性数量）
+    input_dim = cat_features.shape[1]
+    print(f"  类别属性维度: {input_dim}")
+
+    # 获取训练/验证/测试集索引
+    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
+    train_idx = list(train_idx)
+    val_idx = list(val_idx)
+    test_idx = list(test_idx)
+
+    # 划分数据集
+    train_cat = cat_features[train_idx]
+    train_labels = labels[train_idx]
+
+    val_cat = cat_features[val_idx]
+    val_labels = labels[val_idx]
+
+    test_cat = cat_features[test_idx]
+    test_labels = labels[test_idx]
+
+    print(f"  训练集: {len(train_idx)} 样本")
+    print(f"  验证集: {len(val_idx)} 样本")
+    print(f"  测试集: {len(test_idx)} 样本")
+
+    # 创建数据集和数据加载器
+    print("创建数据加载器...")
+    train_dataset = CatDataset(train_cat, train_labels, mode='train')
+    val_dataset = CatDataset(val_cat, val_labels, mode='val')
+    test_dataset = CatDataset(test_cat, test_labels, mode='test')
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # 初始化模型 (使用 MoE + Top-K 版本)
+    print("初始化 MoE + Top-K 模型...")
+    model = CatExpert(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        expert_dim=expert_dim,
+        num_experts=num_experts,
+        top_k=top_k,
+        dropout=dropout,
+        device=device
+    ).to(device)
+    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
+
+    # 优化器和损失函数 - 使用权重衰减
+    optimizer = AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
+    criterion = nn.BCELoss()
+
+    # 数据提取函数
+    def extract_fn(batch, device):
+        cat_features = batch['cat_features'].to(device)
+        labels = batch['label'].to(device).unsqueeze(1)
+        return (cat_features,), labels
+
+    return {
+        'name': 'cat',
+        'model': model,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'optimizer': optimizer,
+        'criterion': criterion,
+        'device': device,
+        'checkpoint_dir': checkpoint_dir,
+        'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,
+        'early_stopping_patience': early_stopping_patience,
+        'batch_size': batch_size,
+        'learning_rate': learning_rate,
+        'dropout': dropout,
+        'num_experts': num_experts,
+        'top_k': top_k,
+        'input_dim': input_dim
+    }
+
+
 # ==================== 配置注册表 ====================
 
 EXPERT_CONFIGS = {
     'des': create_des_expert_config,
-    'tweets': create_tweets_expert_config,
+    'post': create_post_expert_config,    # 新的 Post Expert (MoE 版本)
+    'tweets': create_tweets_expert_config, # 保留原版本，兼容旧代码
     'graph': create_graph_expert_config,
+    'cat': create_cat_expert_config,      # 类别属性专家 (MoE 版本)
 }
 
 # 获取专家配置
