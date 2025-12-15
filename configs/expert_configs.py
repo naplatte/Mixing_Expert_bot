@@ -185,24 +185,21 @@ def create_des_expert_config(
     max_grad_norm=1.0,
     dropout=0.3,
     early_stopping_patience=4,
-    num_experts=4,  # MoE 中的专家数量（默认4个）
-    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
-    twibot_dataset=None
+    twibot_dataset=None,
+    **kwargs  # 忽略其他参数（兼容旧配置）
 ):
     """
-    创建 Description Expert 配置 (使用 DeBERTa-v3-base + MoE + Top-K)
+    创建 Description Expert 配置 (单 MLP 版本)
 
     Args:
         model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
         batch_size: 批次大小，默认32
-        learning_rate: 学习率，默认5e-4 (0.0005)
+        learning_rate: 学习率，默认5e-4
         weight_decay: 权重衰减，默认0.01
         dropout: Dropout率，默认0.3
         max_grad_norm: 梯度裁剪阈值，默认1.0
         early_stopping_patience: 早停耐心值，默认4
-        num_experts: MoE 中的专家数量，默认4
-        top_k: 每次选择的专家数量（Top-K），默认2
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+        twibot_dataset: 预加载的Twibot20数据集对象（可选）
 
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
@@ -211,11 +208,9 @@ def create_des_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Description Expert with MoE + Top-K (DeBERTa-v3-base)")
+    print(f"配置 Description Expert (单 MLP 版本)")
     print(f"{'='*60}")
     print(f"  模型: {model_name}")
-    print(f"  专家数量: {num_experts}")
-    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
     print(f"  权重衰减: {weight_decay}")
@@ -267,20 +262,17 @@ def create_des_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # 初始化模型 (使用 MoE + Top-K 版本)
-    print("初始化 MoE + Top-K 模型...")
+    # 初始化模型 (单 MLP 版本)
+    print("初始化单 MLP 模型...")
     model = DesExpertMoE(
         model_name=model_name,
         device=device,
         dropout=dropout,
-        num_experts=num_experts,
-        top_k=top_k,
         expert_dim=64,
         hidden_dim=768
     ).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
 
     # 优化器和损失函数 - 使用权重衰减
     optimizer = AdamW(
@@ -313,13 +305,11 @@ def create_des_expert_config(
         'early_stopping_patience': early_stopping_patience,  # 早停
         'batch_size': batch_size,
         'learning_rate': learning_rate,
-        'dropout': dropout,
-        'num_experts': num_experts,  # MoE 专家数量
-        'top_k': top_k  # Top-K 选择
+        'dropout': dropout
     }
 
 
-# ==================== Post Expert (MoE 版本，替代 Tweets Expert) ====================
+# ==================== Post Expert (单 MLP 版本，替代 Tweets Expert) ====================
 
 class PostDataset(Dataset):
     """Post Expert 数据集"""
@@ -394,12 +384,11 @@ def create_post_expert_config(
     max_grad_norm=1.0,
     dropout=0.3,
     early_stopping_patience=4,
-    num_experts=4,  # MoE 中的专家数量（默认4个）
-    top_k=2,        # Top-K 选择，每次只用权重最大的K个专家（默认2个）
-    twibot_dataset=None
+    twibot_dataset=None,
+    **kwargs  # 忽略其他参数（兼容旧配置）
 ):
     """
-    创建 Post Expert 配置 (使用 DeBERTa-v3-base + MoE + Top-K)
+    创建 Post Expert 配置 (单 MLP 版本)
 
     Args:
         model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
@@ -409,9 +398,7 @@ def create_post_expert_config(
         dropout: Dropout率，默认0.3
         max_grad_norm: 梯度裁剪阈值，默认1.0
         early_stopping_patience: 早停耐心值，默认4
-        num_experts: MoE 中的专家数量，默认4
-        top_k: 每次选择的专家数量（Top-K），默认2
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
+        twibot_dataset: 预加载的Twibot20数据集对象（可选）
 
     Returns:
         dict: 包含模型、数据加载器、优化器等的配置字典
@@ -420,11 +407,9 @@ def create_post_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Post Expert with MoE + Top-K (DeBERTa-v3-base)")
+    print(f"配置 Post Expert (单 MLP 版本)")
     print(f"{'='*60}")
     print(f"  模型: {model_name}")
-    print(f"  专家数量: {num_experts}")
-    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
     print(f"  权重衰减: {weight_decay}")
@@ -480,20 +465,17 @@ def create_post_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
 
-    # 初始化模型 (使用 MoE + Top-K 版本)
-    print("初始化 MoE + Top-K 模型...")
+    # 初始化模型 (单 MLP 版本)
+    print("初始化单 MLP 模型...")
     model = PostExpert(
         model_name=model_name,
         device=device,
         dropout=dropout,
-        num_experts=num_experts,
-        top_k=top_k,
         expert_dim=64,
         hidden_dim=768
     ).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
 
     # 优化器和损失函数 - 使用权重衰减
     optimizer = AdamW(
@@ -526,9 +508,7 @@ def create_post_expert_config(
         'early_stopping_patience': early_stopping_patience,
         'batch_size': batch_size,
         'learning_rate': learning_rate,
-        'dropout': dropout,
-        'num_experts': num_experts,
-        'top_k': top_k
+        'dropout': dropout
     }
 
 
@@ -737,20 +717,24 @@ def create_graph_expert_config(
     weight_decay=1e-4,
     device='cuda',
     checkpoint_dir='../../autodl-fs/model',
-    hidden_dim=128,
+    embedding_dim=128,
     expert_dim=64,
-    num_layers=2,
     dropout=0.3,
-    expert_names=['des', 'tweets'],  # 用于聚合节点特征的专家列表
-    twibot_dataset=None
+    max_grad_norm=1.0,
+    early_stopping_patience=5,
+    twibot_dataset=None,
+    **kwargs  # 忽略其他参数（兼容旧配置）
 ):
     """
-    创建 Graph Expert 配置
+    创建 Graph Expert 配置 (单 MLP 版本)
 
-    节点特征从其他专家的表示聚合而来，使用 RGCN 进行图卷积
+    节点特征从 node_embedding.py 生成的128维特征加载，使用 RGCN + 单个 MLP
 
     Args:
-        expert_names: 用于聚合节点特征的专家列表（必须已训练好）
+        embedding_dim: RGCN隐藏层维度，默认128
+        expert_dim: 专家输出维度，默认64
+        max_grad_norm: 梯度裁剪阈值，默认1.0
+        early_stopping_patience: 早停耐心值，默认5
         twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
 
     Returns:
@@ -760,11 +744,15 @@ def create_graph_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Graph Expert (RGCN)")
+    print(f"配置 Graph Expert (单 MLP 版本)")
     print(f"{'='*60}")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
-    print(f"  使用专家: {expert_names}")
+    print(f"  权重衰减: {weight_decay}")
+    print(f"  Hidden size (embedding_dim): {embedding_dim}")
+    print(f"  Dropout: {dropout}")
+    print(f"  梯度裁剪: {max_grad_norm}")
+    print(f"  早停耐心值: {early_stopping_patience}")
 
     # 加载数据（如果没有预加载）
     if twibot_dataset is None:
@@ -791,87 +779,36 @@ def create_graph_expert_config(
     print(f"  验证集: {len(val_idx)} 节点")
     print(f"  测试集: {len(test_idx)} 节点")
 
-    # ========== 聚合节点特征：从其他专家提取表示 ==========
+    # ========== 加载节点特征：从 node_embedding.py 生成的特征 ==========
     print(f"\n{'='*60}")
-    print(f"从其他专家聚合节点特征")
+    print(f"加载节点初始特征")
     print(f"{'='*60}")
 
-    from tqdm import tqdm
-
-    # 注意：需要对全部节点（包括支持集）提取特征
+    # 注意：需要对全部节点（包括支持集）加载特征
     # df_data 包含所有节点（train + val + test + support）
     num_all_nodes = len(twibot_dataset.df_data)
     print(f"  总节点数（含支持集）: {num_all_nodes}")
 
-    all_node_indices = list(range(num_all_nodes)) # 所有节点索引
-
-    # 定义缓存文件路径
-    cache_dir = Path(dataset_path) / 'graph_expert_cache'
-    cache_dir.mkdir(exist_ok=True)
-
-    # 生成缓存文件名（包含专家列表信息）
-    expert_names_str = '_'.join(sorted(expert_names))
-    aggregated_features_cache = cache_dir / f'aggregated_node_features_{expert_names_str}.pt'
-
-    # 检查是否存在缓存文件
-    if aggregated_features_cache.exists():
-        print(f"\n  ✓ 发现缓存的聚合特征，直接加载...")
-        print(f"    缓存路径: {aggregated_features_cache}")
-        initial_node_features = torch.load(aggregated_features_cache, map_location='cpu')
-        print(f"  ✓ 加载完成，节点特征形状: {initial_node_features.shape}")
-    else:
-        print(f"\n  未找到缓存，开始提取专家特征...")
-
-        # 存储所有节点的专家表示
-        all_expert_embeddings = []  # List of [num_all_nodes, 64]
-
-        for expert_name in expert_names:
-            # 检查单个专家的缓存
-            expert_cache_file = cache_dir / f'{expert_name}_node_features.pt'
-
-            if expert_cache_file.exists():
-                print(f"\n  ✓ 加载 {expert_name} 专家的缓存特征...")
-                print(f"    缓存路径: {expert_cache_file}")
-                cached_data = torch.load(expert_cache_file, map_location='cpu')
-                embeddings = cached_data['embeddings']
-                mask = cached_data['mask']
-                print(f"    有效样本: {mask.sum().item()}/{len(mask)}")
-            else:
-                print(f"\n  提取 {expert_name} 专家特征...")
-
-                # 提取该专家对所有节点的表示（包括支持集）
-                # 使用本地函数提取特征
-                embeddings, mask = _extract_expert_features_with_mask(
-                    expert_name, all_node_indices, dataset_path, checkpoint_dir, device,
-                    twibot_dataset=twibot_dataset  # 传入已加载的数据集，避免重复加载
-                )
-
-                # 保存单个专家的特征到缓存
-                print(f"    保存 {expert_name} 特征到缓存...")
-                torch.save({
-                    'embeddings': embeddings.cpu(),
-                    'mask': mask.cpu()
-                }, expert_cache_file)
-                print(f"    ✓ 已保存到: {expert_cache_file}")
-
-            all_expert_embeddings.append(embeddings)  # [num_all_nodes, 64]
-
-        # 聚合所有专家的表示：简单拼接后通过线性层
-        print(f"\n  聚合 {len(expert_names)} 个专家的特征...")
-        stacked_embeddings = torch.stack(all_expert_embeddings, dim=1)  # [num_all_nodes, num_experts, 64]
-
-        # 方式1：平均池化
-        initial_node_features = torch.mean(stacked_embeddings, dim=1)  # [num_all_nodes, 64]
-
-        # 方式2：拼接（如果想用这个，需要修改 input_dim）
-        # initial_node_features = stacked_embeddings.view(num_all_nodes, -1)  # [num_all_nodes, num_experts*64]
-
-        print(f"  初始节点特征形状: {initial_node_features.shape}")
-
-        # 保存聚合后的特征
-        print(f"\n  保存聚合特征到缓存...")
-        torch.save(initial_node_features.cpu(), aggregated_features_cache)
-        print(f"  ✓ 已保存到: {aggregated_features_cache}")
+    # 从 node_embedding.py 生成的特征文件加载
+    node_features_path = Path('../../autodl-fs/node_embedding/node_initial_features.pt')
+    
+    if not node_features_path.exists():
+        raise FileNotFoundError(
+            f"节点特征文件不存在: {node_features_path}\n"
+            "请先运行 node_embedding.py 生成节点特征：\n"
+            "  python scripts/node_embedding.py"
+        )
+    
+    print(f"  加载节点特征: {node_features_path}")
+    initial_node_features = torch.load(node_features_path, map_location='cpu')
+    print(f"  ✓ 加载完成，节点特征形状: {initial_node_features.shape}")
+    
+    # 验证节点数量是否匹配
+    if initial_node_features.shape[0] != num_all_nodes:
+        raise ValueError(
+            f"节点特征数量 ({initial_node_features.shape[0]}) 与数据集节点数 ({num_all_nodes}) 不匹配\n"
+            "请重新运行 node_embedding.py 生成节点特征"
+        )
 
     # 创建数据集和数据加载器（只用带标签的节点）
     print("\n创建数据加载器...")
@@ -887,15 +824,14 @@ def create_graph_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
 
-    # 初始化模型
-    print("\n初始化 Graph Expert 模型...")
+    # 初始化模型 (单 MLP 版本)
+    print("\n初始化 Graph Expert 模型 (单 MLP 版本)...")
     model = GraphExpert(
         num_nodes=num_all_nodes,
         initial_node_features=initial_node_features,
         num_relations=2,  # following (0) 和 follower (1)
-        hidden_dim=hidden_dim,
+        embedding_dim=embedding_dim,
         expert_dim=expert_dim,
-        num_layers=num_layers,
         dropout=dropout,
         device=device
     ).to(device)
@@ -925,12 +861,18 @@ def create_graph_expert_config(
         'device': device,
         'checkpoint_dir': checkpoint_dir,
         'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,
+        'early_stopping_patience': early_stopping_patience,
         'edge_index': edge_index,  # 保存图结构供后续使用
-        'edge_type': edge_type
+        'edge_type': edge_type,
+        'batch_size': batch_size,
+        'learning_rate': learning_rate,
+        'dropout': dropout,
+        'embedding_dim': embedding_dim
     }
 
 
-# ==================== Cat Expert (类别属性专家 MoE 版本) ====================
+# ==================== Cat Expert (类别属性专家 单 MLP 版本) ====================
 
 class CatDataset(Dataset):
     """Category Property Expert 数据集"""
@@ -982,14 +924,12 @@ def create_cat_expert_config(
     max_grad_norm=1.0,
     dropout=0.2,
     early_stopping_patience=5,
-    num_experts=3,  # MoE 中的专家数量（默认3个）
-    top_k=1,        # Top-K 选择，每次只用权重最大的K个专家（默认1个）
-    hidden_dim=64,  # 两层MLP隐藏层维度
     expert_dim=64,  # 专家输出维度
-    twibot_dataset=None
+    twibot_dataset=None,
+    **kwargs  # 忽略其他参数（兼容旧配置）
 ):
     """
-    创建 Category Property Expert 配置 (MoE + Top-K)
+    创建 Category Property Expert 配置 (单 MLP 版本)
 
     类别属性包括:
         - protected, geo_enabled, verified, contributors_enabled
@@ -1005,9 +945,6 @@ def create_cat_expert_config(
         dropout: Dropout率，默认0.2
         max_grad_norm: 梯度裁剪阈值，默认1.0
         early_stopping_patience: 早停耐心值，默认5
-        num_experts: MoE 中的专家数量，默认3
-        top_k: 每次选择的专家数量（Top-K），默认1
-        hidden_dim: 两层MLP隐藏层维度，默认64
         expert_dim: 专家输出维度，默认64
         twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
 
@@ -1018,10 +955,8 @@ def create_cat_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Category Property Expert with MoE + Top-K (3选1)")
+    print(f"配置 Category Property Expert (单 MLP 版本)")
     print(f"{'='*60}")
-    print(f"  专家数量: {num_experts}")
-    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
     print(f"  权重衰减: {weight_decay}")
@@ -1079,20 +1014,16 @@ def create_cat_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # 初始化模型 (使用 MoE + Top-K 版本)
-    print("初始化 MoE + Top-K 模型...")
+    # 初始化模型 (单 MLP 版本)
+    print("初始化单 MLP 模型...")
     model = CatExpert(
         input_dim=input_dim,
-        hidden_dim=hidden_dim,
         expert_dim=expert_dim,
-        num_experts=num_experts,
-        top_k=top_k,
         dropout=dropout,
         device=device
     ).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
 
     # 优化器和损失函数 - 使用权重衰减
     optimizer = AdamW(
@@ -1126,8 +1057,6 @@ def create_cat_expert_config(
         'batch_size': batch_size,
         'learning_rate': learning_rate,
         'dropout': dropout,
-        'num_experts': num_experts,
-        'top_k': top_k,
         'input_dim': input_dim
     }
 
@@ -1178,14 +1107,12 @@ def create_num_expert_config(
     max_grad_norm=1.0,
     dropout=0.2,
     early_stopping_patience=5,
-    num_experts=3,  # MoE 中的专家数量（默认3个）
-    top_k=1,        # Top-K 选择，每次只用权重最大的K个专家（默认1个）
-    hidden_dim=64,  # 全连接层隐藏层维度
     expert_dim=64,  # 专家输出维度
-    twibot_dataset=None
+    twibot_dataset=None,
+    **kwargs  # 忽略其他参数（兼容旧配置）
 ):
     """
-    创建 Numerical Property Expert 配置 (MoE + Top-K)
+    创建 Numerical Property Expert 配置 (单 MLP 版本)
 
     数值属性包括:
         - followers_count (粉丝数)
@@ -1206,9 +1133,6 @@ def create_num_expert_config(
         dropout: Dropout率，默认0.2
         max_grad_norm: 梯度裁剪阈值，默认1.0
         early_stopping_patience: 早停耐心值，默认5
-        num_experts: MoE 中的专家数量，默认3
-        top_k: 每次选择的专家数量（Top-K），默认1
-        hidden_dim: 全连接层隐藏层维度，默认64
         expert_dim: 专家输出维度，默认64
         twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
 
@@ -1219,10 +1143,8 @@ def create_num_expert_config(
         dataset_path = str(PROJECT_ROOT / 'processed_data')
 
     print(f"\n{'='*60}")
-    print(f"配置 Numerical Property Expert with MoE + Top-K (3选1)")
+    print(f"配置 Numerical Property Expert (单 MLP 版本)")
     print(f"{'='*60}")
-    print(f"  专家数量: {num_experts}")
-    print(f"  Top-K 选择: {top_k} (每次只用权重最大的{top_k}个专家)")
     print(f"  批次大小: {batch_size}")
     print(f"  学习率: {learning_rate}")
     print(f"  权重衰减: {weight_decay}")
@@ -1280,20 +1202,16 @@ def create_num_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # 初始化模型 (使用 MoE + Top-K 版本)
-    print("初始化 MoE + Top-K 模型...")
+    # 初始化模型 (单 MLP 版本)
+    print("初始化单 MLP 模型...")
     model = NumExpert(
         input_dim=input_dim,
-        hidden_dim=hidden_dim,
         expert_dim=expert_dim,
-        num_experts=num_experts,
-        top_k=top_k,
         dropout=dropout,
         device=device
     ).to(device)
     print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"  - Gating Network + {num_experts} 个 MLP 专家 (Top-{top_k} 选择)")
 
     # 优化器和损失函数 - 使用权重衰减
     optimizer = AdamW(
@@ -1327,8 +1245,6 @@ def create_num_expert_config(
         'batch_size': batch_size,
         'learning_rate': learning_rate,
         'dropout': dropout,
-        'num_experts': num_experts,
-        'top_k': top_k,
         'input_dim': input_dim
     }
 

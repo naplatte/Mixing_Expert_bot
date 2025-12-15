@@ -28,8 +28,8 @@ class Twibot20(Dataset):
             df_train = pd.read_json('../../autodl-fs/Data/train.json') # ('./Data/train.json')
             print('加载 test.json')
             df_test = pd.read_json('../../autodl-fs/Data/test.json')
-            # print('加载 support.json')
-            # df_support = pd.read_json('../../autodl-fs/Data/support.json')
+            print('加载 support.json')
+            df_support = pd.read_json('../../autodl-fs/Data/support.json')
             print('加载 dev.json')
             df_dev = pd.read_json('../../autodl-fs/Data/dev.json')
             print('Finished')
@@ -38,12 +38,12 @@ class Twibot20(Dataset):
             df_train = df_train.iloc[:,[0,1,2,3,5]] # 除domain之外的其余模块信息
             df_test = df_test.iloc[:,[0,1,2,3,5]]
             df_dev = df_dev.iloc[:,[0,1,2,3,5]]
-            # df_support = df_support.iloc[:,[0,1,2,3]]
-            # df_support['label'] = 'None' # 支持集没有标签信息
+            df_support = df_support.iloc[:,[0,1,2,3]]
+            df_support['label'] = 'None' # 支持集没有标签信息
 
             # 拼接数据集,拼接后重新生成连续的索引
             self.df_data_labeled = pd.concat([df_train,df_dev,df_test],ignore_index=True) # 整合带标签的数据集
-            # self.df_data = pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
+            self.df_data = pd.concat([df_train,df_dev,df_test,df_support],ignore_index=True) # 全部数据集
 
             self.save = save
 
@@ -269,50 +269,50 @@ class Twibot20(Dataset):
         return category_properties
 
     # 构建异质图
-    # def build_graph(self):
-    #     print('开始构建异质图',end='   ')
-    #     path = os.path.join('../../autodl-fs/pt_data', 'edge_index.pt')
-    #     if not os.path.exists(path):
-    #         id2index_dict = {id: index for index, id in enumerate(self.df_data['ID'])}
-    #         edge_index = []
-    #         edge_type = []
-    #         for i, relation in enumerate(self.df_data['neighbor']):
-    #             if relation is not None:
-    #                 # following 关系 (edge_type = 0)
-    #                 for each_id in relation['following']:
-    #                     try:
-    #                         target_id = id2index_dict[int(each_id)]
-    #                     except KeyError:
-    #                         continue
-    #                     else:
-    #                         edge_index.append([i, target_id])
-    #                         edge_type.append(0)  # following 关系
-    #                 # follower 关系 (edge_type = 1)
-    #                 for each_id in relation['follower']:
-    #                     try:
-    #                         target_id = id2index_dict[int(each_id)]
-    #                     except KeyError:
-    #                         continue
-    #                     else:
-    #                         edge_index.append([i, target_id])
-    #                         edge_type.append(1)  # follower 关系
-    #             else:
-    #                 continue
-    #
-    #         edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(self.device)
-    #         edge_type = torch.tensor(edge_type, dtype=torch.long).to(self.device)
-    #
-    #         if self.save:
-    #             # 确保目录存在
-    #             os.makedirs('../../autodl-fs/pt_data', exist_ok=True)
-    #             torch.save(edge_index, os.path.join('../../autodl-fs/pt_data', "edge_index.pt"))
-    #             torch.save(edge_type, os.path.join('../../autodl-fs/pt_data', "edge_type.pt"))
-    #     else:
-    #         edge_index = torch.load(os.path.join('../../autodl-fs/pt_data', "edge_index.pt")).to(self.device)
-    #         edge_type = torch.load(os.path.join('../../autodl-fs/pt_data', "edge_type.pt")).to(self.device)
-    #
-    #     print('构建异质图完成')
-    #     return edge_index, edge_type
+    def build_graph(self):
+        print('开始构建异质图',end='   ')
+        path = os.path.join('../../autodl-fs/pt_data', 'edge_index.pt')
+        if not os.path.exists(path):
+            id2index_dict = {id: index for index, id in enumerate(self.df_data['ID'])}
+            edge_index = []
+            edge_type = []
+            for i, relation in enumerate(self.df_data['neighbor']):
+                if relation is not None:
+                    # following 关系 (edge_type = 0)
+                    for each_id in relation['following']:
+                        try:
+                            target_id = id2index_dict[int(each_id)]
+                        except KeyError:
+                            continue
+                        else:
+                            edge_index.append([i, target_id])
+                            edge_type.append(0)  # following 关系
+                    # follower 关系 (edge_type = 1)
+                    for each_id in relation['follower']:
+                        try:
+                            target_id = id2index_dict[int(each_id)]
+                        except KeyError:
+                            continue
+                        else:
+                            edge_index.append([i, target_id])
+                            edge_type.append(1)  # follower 关系
+                else:
+                    continue
+
+            edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(self.device)
+            edge_type = torch.tensor(edge_type, dtype=torch.long).to(self.device)
+
+            if self.save:
+                # 确保目录存在
+                os.makedirs('../../autodl-fs/pt_data', exist_ok=True)
+                torch.save(edge_index, os.path.join('../../autodl-fs/pt_data', "edge_index.pt"))
+                torch.save(edge_type, os.path.join('../../autodl-fs/pt_data', "edge_type.pt"))
+        else:
+            edge_index = torch.load(os.path.join('../../autodl-fs/pt_data', "edge_index.pt")).to(self.device)
+            edge_type = torch.load(os.path.join('../../autodl-fs/pt_data', "edge_type.pt")).to(self.device)
+
+        print('构建异质图完成')
+        return edge_index, edge_type
 
     # 明确训练集、验证集、测试集在拼接后的标签数据中的索引范围
     def train_val_test_mask(self):

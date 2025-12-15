@@ -36,6 +36,15 @@ def train_single_expert(expert_name, config_params, num_epochs=10, save_embeddin
         if 'num_top_k' in adjusted_params:
             adjusted_params['top_k'] = adjusted_params['num_top_k']
 
+    elif expert_name == 'graph':
+        # Graph Expert 使用专用的 MoE 参数（2选1）
+        if 'graph_num_experts' in adjusted_params:
+            adjusted_params['num_experts'] = adjusted_params['graph_num_experts']
+        if 'graph_top_k' in adjusted_params:
+            adjusted_params['top_k'] = adjusted_params['graph_top_k']
+        if 'graph_dropout' in adjusted_params:
+            adjusted_params['dropout'] = adjusted_params['graph_dropout']
+
     # 获取专家配置
     config = get_expert_config(expert_name, **adjusted_params)
 
@@ -196,15 +205,15 @@ def main():
     parser.add_argument('--roberta_model', type=str, default='distilroberta-base',
                         help='RoBERTa模型名称 (用于旧版 Tweets Expert)')
 
-    # Graph Expert 参数
-    parser.add_argument('--graph_hidden_dim', type=int, default=128,
-                        help='图专家隐藏层维度')
-    parser.add_argument('--graph_num_layers', type=int, default=2,
-                        help='图专家RGCN层数')
+    # Graph Expert 参数 (MoE 版本) - 2选1
+    parser.add_argument('--graph_embedding_dim', type=int, default=128,
+                        help='图专家RGCN隐藏层维度')
+    parser.add_argument('--graph_num_experts', type=int, default=2,
+                        help='图专家MoE中的专家数量 (2选1)')
+    parser.add_argument('--graph_top_k', type=int, default=1,
+                        help='图专家MoE Top-K选择数量')
     parser.add_argument('--graph_dropout', type=float, default=0.3,
                         help='图专家Dropout比率')
-    parser.add_argument('--graph_expert_names', type=str, default='des,post',
-                        help='图专家依赖的专家列表（逗号分隔）')
 
     # 特征嵌入保存参数
     parser.add_argument('--save_embeddings', action='store_true', default=True,
@@ -242,11 +251,11 @@ def main():
         'num_top_k': args.num_top_k,
         # 旧版 Tweets Expert 参数 (兼容)
         'roberta_model_name': args.roberta_model,
-        # Graph Expert 参数
-        'hidden_dim': args.graph_hidden_dim,
-        'num_layers': args.graph_num_layers,
-        'dropout': args.graph_dropout,
-        'expert_names': [e.strip() for e in args.graph_expert_names.split(',')],
+        # Graph Expert 参数 (MoE 版本)
+        'embedding_dim': args.graph_embedding_dim,
+        'graph_num_experts': args.graph_num_experts,
+        'graph_top_k': args.graph_top_k,
+        'graph_dropout': args.graph_dropout,
     }
 
     # 添加学习率 (如果指定)

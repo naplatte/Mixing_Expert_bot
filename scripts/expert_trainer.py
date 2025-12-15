@@ -314,6 +314,7 @@ class ExpertTrainer:
                                      ('val', self.val_loader),
                                      ('test', self.test_loader)]:
             embeddings_list = []
+            probs_list = []  # 保存预测概率
             labels_list = []
 
             with torch.no_grad():
@@ -326,19 +327,21 @@ class ExpertTrainer:
                         inputs, labels = result
                         has_data = None
 
-                    # 获取特征嵌入（64维专家表示）
-                    expert_repr, _ = self.model(*inputs)
+                    # 获取特征嵌入（64维专家表示）和预测概率
+                    expert_repr, bot_prob = self.model(*inputs)
 
                     embeddings_list.append(expert_repr.cpu())
+                    probs_list.append(bot_prob.cpu())  # 保存预测概率
                     labels_list.append(labels.cpu())
 
             # 合并所有批次
             all_embeddings[split_name] = {
                 'embeddings': torch.cat(embeddings_list, dim=0),  # [N, 64]
+                'probs': torch.cat(probs_list, dim=0),  # [N, 1] - 预测概率
                 'labels': torch.cat(labels_list, dim=0)  # [N, 1]
             }
 
-            print(f"  {split_name} 特征形状: {all_embeddings[split_name]['embeddings'].shape}")
+            print(f"  {split_name} 特征形状: {all_embeddings[split_name]['embeddings'].shape}, 概率形状: {all_embeddings[split_name]['probs'].shape}")
 
         # 保存到文件
         torch.save(all_embeddings, save_file)
@@ -402,9 +405,9 @@ class ExpertTrainer:
         print(f"  ✓ 保存最终模型: {self.checkpoint_dir / f'{self.name}_expert_final.pt'}")
         print(f"  ✓ 最优模型路径: {self.checkpoint_dir / f'{self.name}_expert_best.pt'}")
 
-        # 如果是 MoE 模型（DesExpertMoE, PostExpert, CatExpert 或 NumExpert），打印专家使用统计
-        from src.model import DesExpertMoE, PostExpert, CatExpert, NumExpert
-        if isinstance(self.model, (DesExpertMoE, PostExpert, CatExpert, NumExpert)):
+        # 如果是 MoE 模型（DesExpertMoE, PostExpert, CatExpert, NumExpert 或 GraphExpert），打印专家使用统计
+        from src.model import DesExpertMoE, PostExpert, CatExpert, NumExpert, GraphExpert
+        if isinstance(self.model, (DesExpertMoE, PostExpert, CatExpert, NumExpert, GraphExpert)):
             self.model.print_expert_usage_stats()
 
         # 保存特征嵌入
