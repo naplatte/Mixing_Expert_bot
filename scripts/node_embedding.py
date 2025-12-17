@@ -11,14 +11,15 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from transformers import AutoModel, DebertaV2Tokenizer
+from transformers import AutoModel, AutoTokenizer
 from torch import nn
 
 
 class NodeEmbeddingGenerator:
     """
     生成图节点的初始特征表示
-    节点特征由des、数值、类别三个模态的encoder输出拼接而成（不包括推文）
+    节点特征由des、数值、类别、post四个模态的encoder输出拼接而成
+    每个模态输出32维，总共128维
     """
     
     def __init__(self, device='cuda', batch_size=64):
@@ -79,6 +80,36 @@ class NodeEmbeddingGenerator:
         
         print(f'  简介数据: {len(description)} 条\n')
         return description
+    
+    def preprocess_post(self):
+        """预处理所有节点的推文数据（参考dataset.py的tweets_preprogress）"""
+        print('预处理推文数据...')
+        path = os.path.join(self.save_dir, 'post_all.npy')
+        
+        if os.path.exists(path):
+            print('  从缓存加载...')
+            posts = np.load(path, allow_pickle=True)
+            try:
+                posts = posts.tolist()
+            except Exception:
+                pass
+        else:
+            posts = []
+            for i in tqdm(range(self.num_nodes), desc='  处理推文'):
+                one_user_tweets = []
+                if self.df_data['tweet'][i] is None:
+                    one_user_tweets.append('')
+                else:
+                    for each in self.df_data['tweet'][i]:
+                        one_user_tweets.append(each)
+                posts.append(one_user_tweets)
+            
+            os.makedirs(self.save_dir, exist_ok=True)
+            posts_obj = np.array(posts, dtype=object)
+            np.save(path, posts_obj, allow_pickle=True)
+        
+        print(f'  推文数据: {len(posts)} 条\n')
+        return posts
     
     def preprocess_numerical(self):
         """预处理所有节点的数值类数据"""
@@ -192,11 +223,11 @@ class NodeEmbeddingGenerator:
     
     def encode_description(self, descriptions):
         """
-        使用DeBERTa encoder编码简介数据
-        768维 -> 43维
+        使用RoBERTa encoder编码简介数据
+        768维 -> 32维
         """
         print('='*60)
-        print('编码简介数据 (DeBERTa)')
+        print('编码简介数据 (RoBERTa)')
         print('='*60)
         
         save_path = os.path.join(self.save_dir, 'node_des_embeddings.pt')
@@ -207,9 +238,9 @@ class NodeEmbeddingGenerator:
             print(f'简介编码维度: {des_embeddings.shape}\n')
             return des_embeddings
         
-        model_name = 'microsoft/deberta-v3-base'
+        model_name = 'roberta-base'
         print(f'加载模型: {model_name}')
-        tokenizer = DebertaV2Tokenizer.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
         backbone_model = AutoModel.from_pretrained(model_name)
         backbone_model.eval()
         backbone_model = backbone_model.to(self.device)
@@ -217,7 +248,7 @@ class NodeEmbeddingGenerator:
         for param in backbone_model.parameters():
             param.requires_grad = False
         
-        projection = nn.Linear(768, 43).to(self.device)
+        projection = nn.Linear(768, 32).to(self.device)
         
         all_embeddings = []
         
@@ -271,10 +302,93 @@ class NodeEmbeddingGenerator:
         
         return des_embeddings
     
+    def encode_post(self, posts):
+        """
+        使用RoBERTa encoder编码推文数据
+        768维 -> 32维
+        """
+        print('='*60)
+        print('编码推文数据 (RoBERTa)')
+        print('='*60)
+        
+        save_path = os.path.join(self.save_dir, 'node_post_embeddings.pt')
+        
+        if os.path.exists(save_path):
+            print('从缓存加载推文编码...')
+            post_embeddings = torch.load(save_path).to(self.device)
+            print(f'推文编码维度: {post_embeddings.shape}\n')
+            return post_embeddings
+        
+        model_name = 'roberta-base'
+        print(f'加载模型: {model_name}')
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        backbone_model = AutoModel.from_pretrained(model_name)
+        backbone_model.eval()
+        backbone_model = backbone_model.to(self.device)
+        
+        for param in backbone_model.parameters():
+            param.requires_grad = False
+        
+        projection = nn.Linear(768, 32).to(self.device)
+        
+        all_embeddings = []
+        
+        num_batches = (self.num_nodes + self.batch_size - 1) // self.batch_size
+        
+        with torch.no_grad():
+            for batch_idx in tqdm(range(num_batches), desc='编码推文'):
+                start_idx = batch_idx * self.batch_size
+                end_idx = min(start_idx + self.batch_size, self.num_nodes)
+                batch_posts = posts[start_idx:end_idx]
+                
+                cleaned_posts = []
+                for user_tweets in batch_posts:
+                    if user_tweets is None or len(user_tweets) == 0:
+                        cleaned_posts.append('')
+                    else:
+                        tweet_texts = [str(t).strip() for t in user_tweets[:20] if t is not None and str(t).strip() != '']
+                        combined_text = ' '.join(tweet_texts) if tweet_texts else ''
+                        cleaned_posts.append(combined_text)
+                
+                encoded = tokenizer(
+                    cleaned_posts,
+                    max_length=256,
+                    padding=True,
+                    truncation=True,
+                    return_tensors='pt'
+                )
+                
+                input_ids = encoded['input_ids'].to(self.device)
+                attention_mask = encoded['attention_mask'].to(self.device)
+                
+                outputs = backbone_model(input_ids=input_ids, attention_mask=attention_mask)
+                hidden_states = outputs.last_hidden_state
+                
+                attention_mask_expanded = attention_mask.unsqueeze(-1).float()
+                masked_hidden = hidden_states * attention_mask_expanded
+                sum_hidden = masked_hidden.sum(dim=1)
+                sum_mask = attention_mask_expanded.sum(dim=1)
+                sentence_vectors = sum_hidden / sum_mask.clamp(min=1)
+                
+                projected = projection(sentence_vectors)
+                all_embeddings.append(projected.cpu())
+        
+        post_embeddings = torch.cat(all_embeddings, dim=0).to(self.device)
+        
+        os.makedirs(self.save_dir, exist_ok=True)
+        torch.save(post_embeddings, save_path)
+        
+        print(f'推文编码完成: {post_embeddings.shape}\n')
+        
+        del backbone_model, tokenizer, projection
+        torch.cuda.empty_cache()
+        
+        return post_embeddings
+    
     def encode_numerical(self, num_features):
         """
         使用线性层编码数值数据
-        6维 -> 43维
+        6维 -> 32维
         """
         print('='*60)
         print('编码数值数据 (Linear Encoder)')
@@ -293,7 +407,7 @@ class NodeEmbeddingGenerator:
             nn.LayerNorm(64),
             nn.LeakyReLU(negative_slope=0.01),
             nn.Dropout(0.2),
-            nn.Linear(64, 43)
+            nn.Linear(64, 32)
         ).to(self.device)
         
         with torch.no_grad():
@@ -312,7 +426,7 @@ class NodeEmbeddingGenerator:
     def encode_categorical(self, cat_features):
         """
         使用线性层编码类别数据
-        11维 -> 42维
+        11维 -> 32维
         """
         print('='*60)
         print('编码类别数据 (Linear Encoder)')
@@ -331,7 +445,7 @@ class NodeEmbeddingGenerator:
             nn.LayerNorm(64),
             nn.LeakyReLU(negative_slope=0.01),
             nn.Dropout(0.2),
-            nn.Linear(64, 42)
+            nn.Linear(64, 32)
         ).to(self.device)
         
         with torch.no_grad():
@@ -364,17 +478,20 @@ class NodeEmbeddingGenerator:
         self.load_data()
         
         descriptions = self.preprocess_description()
+        posts = self.preprocess_post()
         num_features = self.preprocess_numerical()
         cat_features = self.preprocess_categorical()
         
         des_embeddings = self.encode_description(descriptions)
+        post_embeddings = self.encode_post(posts)
         num_embeddings = self.encode_numerical(num_features)
         cat_embeddings = self.encode_categorical(cat_features)
         
-        print('拼接三个模态的特征...')
-        node_features = torch.cat([des_embeddings, num_embeddings, cat_embeddings], dim=1)
+        print('拼接四个模态的特征...')
+        node_features = torch.cat([des_embeddings, post_embeddings, num_embeddings, cat_embeddings], dim=1)
         
         print(f'  - 简介编码: {des_embeddings.shape[1]}维')
+        print(f'  - 推文编码: {post_embeddings.shape[1]}维')
         print(f'  - 数值编码: {num_embeddings.shape[1]}维')
         print(f'  - 类别编码: {cat_embeddings.shape[1]}维')
         print(f'  - 总维度: {node_features.shape[1]}维')

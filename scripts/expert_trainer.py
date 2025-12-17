@@ -349,6 +349,131 @@ class ExpertTrainer:
 
         return all_embeddings
 
+    def extract_and_save_embeddings_with_mask(self, save_dir='../../autodl-fs/labeled_embedding', 
+                                               raw_data_list=None, split_indices=None, force=False):
+        """
+        提取并保存特征嵌入（带 mask，用于 des/post 专家）
+        
+        与 extract_and_save_embeddings 不同，此方法：
+        1. 对所有样本（包括空数据样本）生成 embedding
+        2. 空数据样本用零向量填充，mask=False
+        3. 有效样本正常提取，mask=True
+        
+        Args:
+            save_dir: 保存目录
+            raw_data_list: 原始数据列表（未过滤的完整数据）
+            split_indices: dict, {'train': [...], 'val': [...], 'test': [...]} 各split的索引
+            force: 是否强制重新提取
+        
+        Returns:
+            all_embeddings: dict, 包含 embeddings, probs, labels, mask
+        """
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        save_file = save_path / f'{self.name}_embeddings.pt'
+        
+        # 检查文件是否已存在
+        if save_file.exists() and not force:
+            print(f"\n[{self.name.upper()}] ✓ 特征嵌入文件已存在，跳过提取")
+            print(f"  文件路径: {save_file}")
+            all_embeddings = torch.load(save_file, map_location='cpu')
+            return all_embeddings
+        
+        if raw_data_list is None or split_indices is None:
+            print(f"\n[{self.name.upper()}] 错误: 需要提供 raw_data_list 和 split_indices")
+            print(f"  请使用 extract_and_save_embeddings 方法或提供完整参数")
+            return None
+        
+        print(f"\n[{self.name.upper()}] 提取并保存特征嵌入（带 mask）...")
+        
+        # 加载最佳模型
+        self.load_checkpoint('best')
+        self.model.eval()
+        
+        all_embeddings = {}
+        expert_dim = 64  # 专家表示维度
+        
+        # 判断数据有效性的函数（根据专家类型）
+        def is_valid_data(data_item):
+            if self.name == 'des':
+                # Description: 非空且不是 'None'
+                desc_str = str(data_item).strip()
+                return desc_str != '' and desc_str.lower() != 'none'
+            elif self.name == 'post':
+                # Post/Tweets: 列表非空且有有效推文
+                if isinstance(data_item, list) and len(data_item) > 0:
+                    cleaned = [str(t).strip() for t in data_item 
+                              if str(t).strip() != '' and str(t).strip().lower() != 'none']
+                    return len(cleaned) > 0
+                return False
+            else:
+                return True  # 其他专家默认有效
+        
+        # 对每个 split 处理
+        for split_name, indices in split_indices.items():
+            num_samples = len(indices)
+            embeddings = torch.zeros(num_samples, expert_dim)
+            probs = torch.zeros(num_samples, 1)
+            mask = torch.zeros(num_samples, dtype=torch.bool)
+            labels = torch.zeros(num_samples, 1)
+            
+            # 收集有效样本的索引和数据
+            valid_batch_data = []
+            valid_positions = []
+            
+            for pos, idx in enumerate(indices):
+                data_item = raw_data_list[idx]
+                if is_valid_data(data_item):
+                    valid_batch_data.append((pos, data_item))
+                    valid_positions.append(pos)
+            
+            print(f"  [{split_name}] 有效样本: {len(valid_positions)}/{num_samples}")
+            
+            # 从对应的 loader 获取标签（按顺序）
+            loader = {'train': self.train_loader, 'val': self.val_loader, 'test': self.test_loader}[split_name]
+            
+            # 批量提取有效样本的特征
+            if len(valid_batch_data) > 0:
+                # 使用现有的 loader 提取（loader 已经过滤了无效样本）
+                batch_idx = 0
+                with torch.no_grad():
+                    for batch in tqdm(loader, desc=f"[{self.name.upper()}] 提取 {split_name} 特征"):
+                        result = self.extract_fn(batch, self.device)
+                        if len(result) == 3:
+                            inputs, batch_labels, _ = result
+                        else:
+                            inputs, batch_labels = result
+                        
+                        # 获取特征嵌入和预测概率
+                        expert_repr, bot_prob = self.model(*inputs)
+                        
+                        # 将结果放回对应位置
+                        batch_size = expert_repr.shape[0]
+                        for i in range(batch_size):
+                            if batch_idx < len(valid_positions):
+                                pos = valid_positions[batch_idx]
+                                embeddings[pos] = expert_repr[i].cpu()
+                                probs[pos] = bot_prob[i].cpu()
+                                mask[pos] = True
+                                labels[pos] = batch_labels[i].cpu()
+                                batch_idx += 1
+            
+            all_embeddings[split_name] = {
+                'embeddings': embeddings,  # [N, 64]
+                'probs': probs,            # [N, 1]
+                'mask': mask,              # [N] bool
+                'labels': labels           # [N, 1]
+            }
+            
+            print(f"    特征形状: {embeddings.shape}, mask 有效数: {mask.sum().item()}")
+        
+        # 保存到文件
+        torch.save(all_embeddings, save_file)
+        print(f"  ✓ 特征嵌入（带 mask）已保存到: {save_file}")
+        
+        return all_embeddings
+
     def train(self, num_epochs, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding', force_save_embeddings=False):
         """
         完整训练流程

@@ -154,26 +154,29 @@ class DesExpertMoE(nn.Module):
         print(f"\n[Des Expert] 单 MLP 模型，无专家使用统计\n")
 
 
-# ==================== Post Expert (单 MLP 版本) ====================
+# ==================== Post Expert (注意力 + Top-K 版本) ====================
 
 class PostExpert(nn.Module):
     """
-    Post Expert - 单 MLP 版本
-    使用预训练 DeBERTa-v3-base（冻结参数）提取特征 + 单个 MLP
+    Post Expert - 注意力 + Top-K 版本
+    使用预训练 DeBERTa-v3-base（冻结参数）提取特征 + 注意力池化 + Top-K 选择
 
     嵌入方式:
         对于用户 i 的 n 条推文:
         1. 每条推文被 DeBERTa 嵌入成 token-level 表示
-        2. 平均每条推文的 tokens 得到该推文的向量
-        3. 平均所有 n 条推文的向量，得到用户级表示 (768维)
-        4. 单个 MLP 处理用户级表示
-        5. 输出 64 维专家表示 + bot 概率
+        2. 平均每条推文的 tokens 得到该推文的句向量 (768维)
+        3. 注意力网络计算每条推文的重要性分数
+        4. 选择 Top-K 重要推文（K=32）
+        5. 对 Top-K 推文进行注意力加权聚合，得到用户级表示
+        6. MLP 处理用户级表示
+        7. 输出 64 维专家表示 + bot 概率
     """
     def __init__(self,
                  model_name='microsoft/deberta-v3-base',
                  hidden_dim=768,  # DeBERTa-v3-base 的输出维度是 768
                  expert_dim=64,
                  dropout=0.2,
+                 top_k=32,        # Top-K 重要推文数量
                  device='cuda',
                  **kwargs):  # 忽略其他参数（兼容旧配置）
 
@@ -183,6 +186,7 @@ class PostExpert(nn.Module):
         self.device = device if device == 'cuda' and torch.cuda.is_available() else 'cpu'
         self.hidden_dim = hidden_dim
         self.expert_dim = expert_dim
+        self.top_k = top_k
 
         # DeBERTa-v3 模型和 Tokenizer (不微调，只用于特征提取)
         self.tokenizer = DebertaV2Tokenizer.from_pretrained(model_name)
@@ -193,6 +197,14 @@ class PostExpert(nn.Module):
         # 冻结 DeBERTa 参数，不进行微调
         for param in self.backbone_model.parameters():
             param.requires_grad = False
+
+        # ========== 注意力网络 ==========
+        # 计算每条推文的重要性分数
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1)
+        ).to(self.device)
 
         # ========== 单个 MLP ==========
         # 768 → 512 → 256 → 128 → 64
@@ -223,15 +235,15 @@ class PostExpert(nn.Module):
             nn.Sigmoid()
         ).to(self.device)
 
-    def _extract_user_post_embedding(self, user_posts):
+    def _extract_post_vectors(self, user_posts):
         """
-        提取单个用户的推文嵌入
+        提取单个用户所有推文的句向量
 
         Args:
             user_posts: List[str] - 一个用户的推文列表
 
         Returns:
-            user_embedding: [768] - 用户级推文嵌入
+            post_vectors: [num_posts, 768] - 每条推文的句向量
             is_valid: bool - 是否有有效推文
         """
         device = next(self.parameters()).device
@@ -245,7 +257,7 @@ class PostExpert(nn.Module):
 
         # 如果没有有效推文，返回零向量
         if len(cleaned_posts) == 0:
-            return torch.zeros(self.hidden_dim, device=device), False
+            return torch.zeros(1, self.hidden_dim, device=device), False
 
         # 使用 DeBERTa 提取特征
         with torch.no_grad():
@@ -265,15 +277,73 @@ class PostExpert(nn.Module):
             outputs = self.backbone_model(input_ids=input_ids, attention_mask=attention_mask)
             hidden_states = outputs.last_hidden_state  # [num_posts, seq_len, 768]
 
-            # 对每条推文的所有 token 取平均，得到推文向量
+            # 对每条推文的所有 token 取平均，得到推文句向量
             attention_mask_expanded = attention_mask.unsqueeze(-1).float()  # [num_posts, seq_len, 1]
             masked_hidden = hidden_states * attention_mask_expanded  # [num_posts, seq_len, 768]
             sum_hidden = masked_hidden.sum(dim=1)  # [num_posts, 768]
             sum_mask = attention_mask_expanded.sum(dim=1)  # [num_posts, 1]
             post_vectors = sum_hidden / sum_mask.clamp(min=1)  # [num_posts, 768]
 
-            # 平均所有推文向量，得到用户级表示
-            user_embedding = post_vectors.mean(dim=0)  # [768]
+        return post_vectors, True
+
+    def _attention_topk_pooling(self, post_vectors):
+        """
+        对推文句向量进行注意力 + Top-K 池化
+
+        Args:
+            post_vectors: [num_posts, 768] - 推文句向量
+
+        Returns:
+            user_embedding: [768] - 用户级表示
+        """
+        num_posts = post_vectors.shape[0]
+
+        # 计算每条推文的注意力分数
+        attention_scores = self.attention(post_vectors)  # [num_posts, 1]
+        attention_scores = attention_scores.squeeze(-1)  # [num_posts]
+
+        # 确定实际的 K 值（不能超过推文数量）
+        k = min(self.top_k, num_posts)
+
+        # 选择 Top-K 重要推文
+        if k < num_posts:
+            # 获取 Top-K 的索引
+            topk_scores, topk_indices = torch.topk(attention_scores, k)
+            topk_vectors = post_vectors[topk_indices]  # [k, 768]
+        else:
+            # 推文数量不足 K，使用全部
+            topk_scores = attention_scores
+            topk_vectors = post_vectors
+
+        # 对 Top-K 推文进行 softmax 归一化
+        attention_weights = F.softmax(topk_scores, dim=0)  # [k]
+        attention_weights = attention_weights.unsqueeze(-1)  # [k, 1]
+
+        # 加权聚合
+        user_embedding = (attention_weights * topk_vectors).sum(dim=0)  # [768]
+
+        return user_embedding
+
+    def _extract_user_post_embedding(self, user_posts):
+        """
+        提取单个用户的推文嵌入（注意力 + Top-K 版本）
+
+        Args:
+            user_posts: List[str] - 一个用户的推文列表
+
+        Returns:
+            user_embedding: [768] - 用户级推文嵌入
+            is_valid: bool - 是否有有效推文
+        """
+        # Step 1: 提取所有推文的句向量
+        post_vectors, is_valid = self._extract_post_vectors(user_posts)
+
+        if not is_valid:
+            device = next(self.parameters()).device
+            return torch.zeros(self.hidden_dim, device=device), False
+
+        # Step 2: 注意力 + Top-K 池化
+        user_embedding = self._attention_topk_pooling(post_vectors)
 
         return user_embedding, True
 

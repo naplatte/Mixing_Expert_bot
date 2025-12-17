@@ -51,8 +51,48 @@ def train_single_expert(expert_name, config_params, num_epochs=10, save_embeddin
     # 创建训练器
     trainer = ExpertTrainer(config)
 
-    # 开始训练
-    history = trainer.train(num_epochs, save_embeddings=save_embeddings, embeddings_dir=embeddings_dir)
+    # 对于 des 和 post 专家，使用带 mask 的 embedding 提取方法
+    if expert_name in ['des', 'post'] and save_embeddings:
+        # 先训练（不保存 embedding）
+        history = trainer.train(num_epochs, save_embeddings=False, embeddings_dir=embeddings_dir)
+        
+        # 然后使用带 mask 的方法提取 embedding
+        # 需要加载原始数据和 split 索引
+        from src.dataset import Twibot20
+        import numpy as np
+        
+        dataset_path = adjusted_params.get('dataset_path', str(project_root / 'processed_data'))
+        device = adjusted_params.get('device', 'cuda')
+        
+        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
+        
+        # 获取原始数据
+        if expert_name == 'des':
+            raw_data = twibot_dataset.Des_preprocess()
+        else:  # post
+            raw_data = twibot_dataset.tweets_preprogress()
+        
+        if isinstance(raw_data, np.ndarray):
+            raw_data = raw_data.tolist()
+        
+        # 获取 split 索引
+        train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
+        split_indices = {
+            'train': list(train_idx),
+            'val': list(val_idx),
+            'test': list(test_idx)
+        }
+        
+        # 提取带 mask 的 embedding
+        trainer.extract_and_save_embeddings_with_mask(
+            save_dir=embeddings_dir,
+            raw_data_list=raw_data,
+            split_indices=split_indices,
+            force=True
+        )
+    else:
+        # 其他专家使用原有方法
+        history = trainer.train(num_epochs, save_embeddings=save_embeddings, embeddings_dir=embeddings_dir)
 
     return history
 
