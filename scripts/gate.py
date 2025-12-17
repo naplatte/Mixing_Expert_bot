@@ -122,12 +122,14 @@ class MoEGate(nn.Module):
 
 class MoEEnsemble(nn.Module):
     """
-    完整的 MoE 集成模型（扩展版，支持 5 个专家 + mask 机制）
+    完整的 MoE 集成模型（扩展版，支持 5 个专家 + mask 机制 + 负载均衡）
 
     门控网络输出权重，直接加权聚合各专家的预测概率:
         p_final = α_cat * p_cat + α_num * p_num + α_graph * p_graph + α_des * p_des + α_post * p_post
 
     对于缺失 des/post 数据的样本，通过 mask 机制自动将对应专家权重置零
+    
+    新增负载均衡损失，防止门控网络坍塌到单一专家
     """
 
     def __init__(self, expert_dim=64, num_experts=5, hidden_dim=64, dropout=0.2):
@@ -167,6 +169,44 @@ class MoEEnsemble(nn.Module):
                    weights[:, 4:5] * p_post)  # [batch_size, 1]
 
         return p_final, weights
+    
+    def compute_load_balancing_loss(self, weights, expert_mask=None):
+        """
+        计算负载均衡损失，鼓励门控网络更均匀地使用各专家
+        
+        参考 Switch Transformer 的负载均衡损失:
+        L_balance = num_experts * sum_i(f_i * P_i)
+        其中 f_i 是专家 i 被选中的比例，P_i 是专家 i 的平均路由概率
+        
+        Args:
+            weights: [batch_size, num_experts] - 门控权重
+            expert_mask: [batch_size, num_experts] - 专家有效性掩码
+            
+        Returns:
+            load_balance_loss: 标量损失值
+        """
+        batch_size = weights.size(0)
+        
+        if expert_mask is not None:
+            # 只考虑有效的专家
+            # 计算每个专家的有效样本数
+            valid_counts = expert_mask.sum(dim=0)  # [num_experts]
+            # 计算每个专家的平均权重（只在有效样本上）
+            masked_weights = weights * expert_mask.float()
+            avg_weights = masked_weights.sum(dim=0) / valid_counts.clamp(min=1)  # [num_experts]
+        else:
+            avg_weights = weights.mean(dim=0)  # [num_experts]
+        
+        # 计算负载均衡损失：鼓励权重分布更均匀
+        # 使用方差作为不均衡度量
+        # 理想情况下，每个专家权重应该接近 1/num_valid_experts
+        num_valid = expert_mask.sum(dim=1).float().mean() if expert_mask is not None else self.num_experts
+        target_weight = 1.0 / num_valid
+        
+        # 方差损失：权重偏离均匀分布的程度
+        load_balance_loss = ((avg_weights - target_weight) ** 2).sum() * self.num_experts
+        
+        return load_balance_loss
 
 
 # ==================== 数据集 ====================
@@ -285,10 +325,18 @@ class ExpertEmbeddingDataset(Dataset):
 class GateTrainer:
     """
     门控网络训练器
+    
+    新增负载均衡损失系数 load_balance_weight，防止门控网络坍塌
     """
 
     def __init__(self, model, train_loader, val_loader, test_loader,
-                 optimizer, criterion, device='cuda', checkpoint_dir='checkpoints'):
+                 optimizer, criterion, device='cuda', checkpoint_dir='checkpoints',
+                 load_balance_weight=0.1):
+        """
+        Args:
+            load_balance_weight: 负载均衡损失的权重系数（默认0.1）
+                                 设为0则不使用负载均衡损失
+        """
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -298,6 +346,7 @@ class GateTrainer:
         self.device = device
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.load_balance_weight = load_balance_weight
 
         self.best_val_loss = float('inf')
         self.history = {'train': [], 'val': [], 'test': {}}
@@ -335,8 +384,15 @@ class GateTrainer:
                 expert_mask
             )
 
-            # 计算损失
-            loss = self.criterion(p_final, labels)
+            # 计算损失 = BCE损失 + 负载均衡损失
+            bce_loss = self.criterion(p_final, labels)
+            
+            if self.load_balance_weight > 0:
+                lb_loss = self.model.compute_load_balancing_loss(weights, expert_mask)
+                loss = bce_loss + self.load_balance_weight * lb_loss
+            else:
+                loss = bce_loss
+                
             loss.backward()
             self.optimizer.step()
 
@@ -578,6 +634,8 @@ def main():
     parser.add_argument('--hidden_dim', type=int, default=64, help='隐藏层维度')
     parser.add_argument('--dropout', type=float, default=0.2, help='Dropout 比例')
     parser.add_argument('--device', type=str, default='cuda', help='设备')
+    parser.add_argument('--load_balance_weight', type=float, default=0.1,
+                        help='负载均衡损失权重（防止门控坍塌，默认0.1，设为0禁用）')
 
     args = parser.parse_args()
 
@@ -607,7 +665,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.BCELoss()
 
-    # 训练器
+    # 训练器（带负载均衡损失）
     trainer = GateTrainer(
         model=model,
         train_loader=train_loader,
@@ -616,7 +674,8 @@ def main():
         optimizer=optimizer,
         criterion=criterion,
         device=device,
-        checkpoint_dir=args.checkpoint_dir
+        checkpoint_dir=args.checkpoint_dir,
+        load_balance_weight=args.load_balance_weight
     )
 
     # 训练

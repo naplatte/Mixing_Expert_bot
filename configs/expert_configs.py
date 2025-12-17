@@ -779,36 +779,14 @@ def create_graph_expert_config(
     print(f"  验证集: {len(val_idx)} 节点")
     print(f"  测试集: {len(test_idx)} 节点")
 
-    # ========== 加载节点特征：从 node_embedding.py 生成的特征 ==========
-    print(f"\n{'='*60}")
-    print(f"加载节点初始特征")
-    print(f"{'='*60}")
-
+    # ========== 节点特征：GraphExpert会自动从embedding_dir加载4个pt文件 ==========
     # 注意：需要对全部节点（包括支持集）加载特征
     # df_data 包含所有节点（train + val + test + support）
     num_all_nodes = len(twibot_dataset.df_data)
     print(f"  总节点数（含支持集）: {num_all_nodes}")
 
-    # 从 node_embedding.py 生成的特征文件加载
-    node_features_path = Path('../../autodl-fs/node_embedding/node_initial_features.pt')
-    
-    if not node_features_path.exists():
-        raise FileNotFoundError(
-            f"节点特征文件不存在: {node_features_path}\n"
-            "请先运行 node_embedding.py 生成节点特征：\n"
-            "  python scripts/node_embedding.py"
-        )
-    
-    print(f"  加载节点特征: {node_features_path}")
-    initial_node_features = torch.load(node_features_path, map_location='cpu')
-    print(f"  ✓ 加载完成，节点特征形状: {initial_node_features.shape}")
-    
-    # 验证节点数量是否匹配
-    if initial_node_features.shape[0] != num_all_nodes:
-        raise ValueError(
-            f"节点特征数量 ({initial_node_features.shape[0]}) 与数据集节点数 ({num_all_nodes}) 不匹配\n"
-            "请重新运行 node_embedding.py 生成节点特征"
-        )
+    # embedding文件目录
+    embedding_dir = '../../autodl-fs/node_embedding'
 
     # 创建数据集和数据加载器（只用带标签的节点）
     print("\n创建数据加载器...")
@@ -824,11 +802,11 @@ def create_graph_expert_config(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
 
-    # 初始化模型 (单 MLP 版本)
-    print("\n初始化 Graph Expert 模型 (单 MLP 版本)...")
+    # 初始化模型 (单 MLP 版本，自动加载4个embedding文件)
+    print("\n初始化 Graph Expert 模型...")
     model = GraphExpert(
         num_nodes=num_all_nodes,
-        initial_node_features=initial_node_features,
+        embedding_dir=embedding_dir,  # 4个pt文件所在目录
         num_relations=2,  # following (0) 和 follower (1)
         embedding_dim=embedding_dim,
         expert_dim=expert_dim,
