@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import Twibot20
-from src.model import DesExpert, DesExpertMoE, TweetsExpert, PostExpert, GraphExpert, CatExpert, NumExpert
+from src.model import DesExpertMoE, PostExpert, GraphExpert, CatExpert, NumExpert
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -27,7 +27,7 @@ def _extract_expert_features_with_mask(expert_name, node_indices, dataset_path, 
     从已训练的专家模型中提取特征
 
     Args:
-        expert_name: 专家名称 ('des', 'tweets')
+        expert_name: 专家名称 ('des', 'post')
         node_indices: 需要提取特征的节点索引列表
         dataset_path: 数据集路径
         checkpoint_dir: 模型检查点目录
@@ -54,7 +54,7 @@ def _extract_expert_features_with_mask(expert_name, node_indices, dataset_path, 
 
     # 根据专家类型创建模型并加载权重
     if expert_name == 'des':
-        model = DesExpert(device=device).to(device)
+        model = DesExpertMoE(device=device).to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
 
         # 获取描述数据
@@ -82,44 +82,6 @@ def _extract_expert_features_with_mask(expert_name, node_indices, dataset_path, 
 
                 # 提取特征
                 expert_repr, _ = model(batch_descriptions)
-                embeddings_list.append(expert_repr.cpu())
-                valid_mask.extend(batch_valid)
-
-        embeddings = torch.cat(embeddings_list, dim=0)
-        mask = torch.tensor(valid_mask, dtype=torch.bool)
-
-    elif expert_name == 'tweets':
-        model = TweetsExpert(device=device).to(device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-
-        # 获取推文数据
-        tweets_list = twibot_dataset.tweets_preprogress()
-        if isinstance(tweets_list, np.ndarray):
-            tweets_list = tweets_list.tolist()
-
-        # 提取特征
-        model.eval()
-        embeddings_list = []
-        valid_mask = []
-
-        batch_size = 32
-        with torch.no_grad():
-            for i in tqdm(range(0, len(node_indices), batch_size), desc=f"  提取 {expert_name} 特征"):
-                batch_indices = node_indices[i:i+batch_size]
-                batch_tweets = [tweets_list[idx] for idx in batch_indices]
-
-                # 检查是否有有效推文
-                batch_valid = []
-                for user_tweets in batch_tweets:
-                    if isinstance(user_tweets, list) and len(user_tweets) > 0:
-                        cleaned = [str(t).strip() for t in user_tweets if str(t).strip() != '' and str(t).strip() != 'None']
-                        is_valid = len(cleaned) > 0
-                    else:
-                        is_valid = False
-                    batch_valid.append(is_valid)
-
-                # 提取特征
-                expert_repr, _ = model(batch_tweets)
                 embeddings_list.append(expert_repr.cpu())
                 valid_mask.extend(batch_valid)
 
@@ -309,7 +271,7 @@ def create_des_expert_config(
     }
 
 
-# ==================== Post Expert (单 MLP 版本，替代 Tweets Expert) ====================
+# ==================== Post Expert (单 MLP 版本) ====================
 
 class PostDataset(Dataset):
     """Post Expert 数据集"""
@@ -509,170 +471,6 @@ def create_post_expert_config(
         'batch_size': batch_size,
         'learning_rate': learning_rate,
         'dropout': dropout
-    }
-
-
-# ==================== Tweets Expert (保留原版本，兼容旧代码) ====================
-
-class TweetsDataset(Dataset):
-    def __init__(self, tweets_list, labels, mode='train'):
-        """
-        Args:
-            tweets_list: 推文列表
-            labels: 标签列表
-            mode: 'train' | 'val' | 'test'
-                  所有阶段都过滤掉没有推文的样本
-        """
-        self.mode = mode
-
-        # 所有阶段都过滤掉没有推文的样本
-        valid_indices = []
-        for idx, user_tweets in enumerate(tweets_list):
-            cleaned = self._clean_tweets(user_tweets)
-            if len(cleaned) > 0:
-                valid_indices.append(idx)
-
-        self.tweets_list = [tweets_list[i] for i in valid_indices]
-        self.labels = [labels[i] for i in valid_indices]
-
-        filtered_count = len(tweets_list) - len(self.tweets_list)
-        print(f"  [{mode}集] 有效样本: {len(self.tweets_list)}/{len(tweets_list)} (过滤 {filtered_count} 个无推文样本)")
-
-    def _clean_tweets(self, user_tweets):
-        """清理推文文本"""
-        cleaned = []
-        if isinstance(user_tweets, list):
-            for tweet in user_tweets:
-                tweet_str = str(tweet).strip()
-                if tweet_str != '' and tweet_str != 'None':
-                    cleaned.append(tweet_str)
-        return cleaned
-
-    def __len__(self):
-        return len(self.tweets_list)
-
-    def __getitem__(self, idx):
-        user_tweets = self.tweets_list[idx]
-        label = self.labels[idx]
-
-        # 清理推文文本（保证非空）
-        cleaned_tweets = self._clean_tweets(user_tweets)
-
-        return {
-            'tweets_text': cleaned_tweets,
-            'label': torch.tensor(label, dtype=torch.float32)
-        }
-
-# 将一个 batch 中每个样本的推文文本列表和标签整理成字典供模型输入
-def collate_tweets_fn(batch):
-    tweets_text_lists = [item['tweets_text'] for item in batch]
-    labels = torch.stack([item['label'] for item in batch])
-
-    return {
-        'tweets_text_list': tweets_text_lists,
-        'label': labels
-    }
-
-def create_tweets_expert_config(
-    dataset_path=None,
-    batch_size=32,
-    learning_rate=1e-3,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    roberta_model_name='distilroberta-base',
-    twibot_dataset=None
-):
-    """
-    创建 Tweets Expert 配置
-
-    Args:
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Tweets Expert")
-    print(f"{'='*60}")
-
-    # 加载数据（如果没有预加载）
-    if twibot_dataset is None:
-        print("加载数据...")
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("使用预加载的数据集...")
-
-    tweets_list = twibot_dataset.tweets_preprogress()
-    labels = twibot_dataset.load_labels()
-
-    if isinstance(tweets_list, np.ndarray):
-        tweets_list = tweets_list.tolist()
-    labels = labels.cpu().numpy()
-
-    # 获取训练/验证/测试集索引
-    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
-
-    # 划分数据集
-    train_tweets = [tweets_list[i] for i in train_idx]
-    train_labels = labels[train_idx]
-
-    val_tweets = [tweets_list[i] for i in val_idx]
-    val_labels = labels[val_idx]
-
-    test_tweets = [tweets_list[i] for i in test_idx]
-    test_labels = labels[test_idx]
-
-    print(f"  训练集: {len(train_tweets)} 样本")
-    print(f"  验证集: {len(val_tweets)} 样本")
-    print(f"  测试集: {len(test_tweets)} 样本")
-
-    # 统计推文数量
-    train_tweet_counts = [len(tweets) if isinstance(tweets, list) else 0 for tweets in train_tweets]
-    print(f"  训练集平均推文数: {np.mean(train_tweet_counts):.2f}")
-
-    # 创建数据集和数据加载器
-    print("创建数据加载器...")
-    train_dataset = TweetsDataset(train_tweets, train_labels, mode='train')
-    val_dataset = TweetsDataset(val_tweets, val_labels, mode='val')
-    test_dataset = TweetsDataset(test_tweets, test_labels, mode='test')
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_tweets_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_tweets_fn)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_tweets_fn)
-
-    # 初始化模型
-    print(f"初始化模型 ({roberta_model_name})...")
-    model = TweetsExpert(roberta_model_name=roberta_model_name, device=device).to(device)
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-    # 优化器和损失函数
-    optimizer = AdamW(model.parameters(), lr=learning_rate)
-    criterion = nn.BCELoss()
-
-    # 数据提取函数
-    def extract_fn(batch, device):
-        tweets_text_list = batch['tweets_text_list']
-        labels = batch['label'].to(device).unsqueeze(1)
-        return (tweets_text_list,), labels
-
-    return {
-        'name': 'tweets',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn
     }
 
 
@@ -1231,18 +1029,17 @@ def create_num_expert_config(
 
 EXPERT_CONFIGS = {
     'des': create_des_expert_config,
-    'post': create_post_expert_config,    # 新的 Post Expert (MoE 版本)
-    'tweets': create_tweets_expert_config, # 保留原版本，兼容旧代码
+    'post': create_post_expert_config,    # Post Expert (单 MLP 版本)
     'graph': create_graph_expert_config,
-    'cat': create_cat_expert_config,      # 类别属性专家 (MoE 版本)
-    'num': create_num_expert_config,      # 数值属性专家 (MoE 版本)
+    'cat': create_cat_expert_config,      # 类别属性专家 (单 MLP 版本)
+    'num': create_num_expert_config,      # 数值属性专家 (单 MLP 版本)
 }
 
 # 获取专家配置
 def get_expert_config(expert_name, **kwargs):
     """
     Args:
-        expert_name: 专家名称 ('des', 'tweets', 'graph', etc.)
+        expert_name: 专家名称 ('des', 'post', 'graph', 'cat', 'num')
         **kwargs: 传递给配置函数的参数
 
     Returns:

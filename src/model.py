@@ -154,29 +154,27 @@ class DesExpertMoE(nn.Module):
         print(f"\n[Des Expert] 单 MLP 模型，无专家使用统计\n")
 
 
-# ==================== Post Expert (注意力 + Top-K 版本) ====================
+# ==================== Post Expert (单 MLP 版本) ====================
 
 class PostExpert(nn.Module):
     """
-    Post Expert - 注意力 + Top-K 版本
-    使用预训练 DeBERTa-v3-base（冻结参数）提取特征 + 注意力池化 + Top-K 选择
+    Post Expert - 单 MLP 版本
+    使用预训练 DeBERTa-v3-base（冻结参数）提取特征 + 注意力加权聚合 + 单个 MLP
 
     嵌入方式:
         对于用户 i 的 n 条推文:
         1. 每条推文被 DeBERTa 嵌入成 token-level 表示
         2. 平均每条推文的 tokens 得到该推文的句向量 (768维)
         3. 注意力网络计算每条推文的重要性分数
-        4. 选择 Top-K 重要推文（K=32）
-        5. 对 Top-K 推文进行注意力加权聚合，得到用户级表示
-        6. MLP 处理用户级表示
-        7. 输出 64 维专家表示 + bot 概率
+        4. 对所有推文进行注意力加权聚合，得到用户级表示
+        5. MLP 处理用户级表示
+        6. 输出 64 维专家表示 + bot 概率
     """
     def __init__(self,
                  model_name='microsoft/deberta-v3-base',
                  hidden_dim=768,  # DeBERTa-v3-base 的输出维度是 768
                  expert_dim=64,
                  dropout=0.2,
-                 top_k=32,        # Top-K 重要推文数量
                  device='cuda',
                  **kwargs):  # 忽略其他参数（兼容旧配置）
 
@@ -186,7 +184,6 @@ class PostExpert(nn.Module):
         self.device = device if device == 'cuda' and torch.cuda.is_available() else 'cpu'
         self.hidden_dim = hidden_dim
         self.expert_dim = expert_dim
-        self.top_k = top_k
 
         # DeBERTa-v3 模型和 Tokenizer (不微调，只用于特征提取)
         self.tokenizer = DebertaV2Tokenizer.from_pretrained(model_name)
@@ -286,9 +283,9 @@ class PostExpert(nn.Module):
 
         return post_vectors, True
 
-    def _attention_topk_pooling(self, post_vectors):
+    def _attention_pooling(self, post_vectors):
         """
-        对推文句向量进行注意力 + Top-K 池化
+        对推文句向量进行注意力加权池化
 
         Args:
             post_vectors: [num_posts, 768] - 推文句向量
@@ -296,37 +293,22 @@ class PostExpert(nn.Module):
         Returns:
             user_embedding: [768] - 用户级表示
         """
-        num_posts = post_vectors.shape[0]
-
         # 计算每条推文的注意力分数
         attention_scores = self.attention(post_vectors)  # [num_posts, 1]
         attention_scores = attention_scores.squeeze(-1)  # [num_posts]
 
-        # 确定实际的 K 值（不能超过推文数量）
-        k = min(self.top_k, num_posts)
-
-        # 选择 Top-K 重要推文
-        if k < num_posts:
-            # 获取 Top-K 的索引
-            topk_scores, topk_indices = torch.topk(attention_scores, k)
-            topk_vectors = post_vectors[topk_indices]  # [k, 768]
-        else:
-            # 推文数量不足 K，使用全部
-            topk_scores = attention_scores
-            topk_vectors = post_vectors
-
-        # 对 Top-K 推文进行 softmax 归一化
-        attention_weights = F.softmax(topk_scores, dim=0)  # [k]
-        attention_weights = attention_weights.unsqueeze(-1)  # [k, 1]
+        # 对所有推文进行 softmax 归一化
+        attention_weights = F.softmax(attention_scores, dim=0)  # [num_posts]
+        attention_weights = attention_weights.unsqueeze(-1)  # [num_posts, 1]
 
         # 加权聚合
-        user_embedding = (attention_weights * topk_vectors).sum(dim=0)  # [768]
+        user_embedding = (attention_weights * post_vectors).sum(dim=0)  # [768]
 
         return user_embedding
 
     def _extract_user_post_embedding(self, user_posts):
         """
-        提取单个用户的推文嵌入（注意力 + Top-K 版本）
+        提取单个用户的推文嵌入（注意力加权版本）
 
         Args:
             user_posts: List[str] - 一个用户的推文列表
@@ -342,8 +324,8 @@ class PostExpert(nn.Module):
             device = next(self.parameters()).device
             return torch.zeros(self.hidden_dim, device=device), False
 
-        # Step 2: 注意力 + Top-K 池化
-        user_embedding = self._attention_topk_pooling(post_vectors)
+        # Step 2: 注意力加权池化
+        user_embedding = self._attention_pooling(post_vectors)
 
         return user_embedding, True
 
@@ -536,146 +518,6 @@ class NumExpert(nn.Module):
     def print_expert_usage_stats(self):
         """兼容接口 - 单 MLP 无专家统计"""
         print(f"\n[Num Expert] 单 MLP 模型，无专家使用统计\n")
-
-
-class DesExpert (nn.Module):
-    def __init__(self):
-        super(DesExpert, self).__init__()
-        self.model = DesExpertMoE()
-
-
-# tweets专家模型 (保留原版本，兼容旧代码)
-class  TweetsExpert(nn.Module):
-    """
-    Tweets Expert Model
-    使用预训练 RoBERTa（不微调）提取特征 + MLP 处理推文信息，对用户的多条推文做平均聚合
-    """
-    def __init__(self, 
-                 roberta_model_name='distilroberta-base',
-                 hidden_dim=768,
-                 expert_dim=64,
-                 dropout=0.1,
-                 device='cuda'):
-        super(TweetsExpert, self).__init__()
-        
-        # RoBERTa 模型和 Tokenizer (不微调，只用于特征提取)
-        self.roberta_tokenizer = AutoTokenizer.from_pretrained(roberta_model_name)
-        self.roberta_model = AutoModel.from_pretrained(roberta_model_name)
-        self.roberta_model.eval()  # 设置为评估模式，不计算梯度
-        # 冻结 RoBERTa 参数，不进行微调
-        for param in self.roberta_model.parameters():
-            param.requires_grad = False
-        # 移动到指定设备
-        self.roberta_model = self.roberta_model.to(device if device == 'cuda' and torch.cuda.is_available() else 'cpu')
-
-        self.hidden_dim = hidden_dim
-        
-        # MLP 网络
-        # 从 RoBERTa 的 768维句向量到 64维 Expert Representation(768->256->128->64)
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, expert_dim)
-        )
-        
-        # Bot Probability 预测头
-        # 从 64维 Expert Representation 到 1维 bot 概率（64->32->1)
-        self.bot_classifier = nn.Sequential(
-            nn.Linear(expert_dim, 32),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(32, 1),
-            nn.Sigmoid()  # 输出 bot 概率
-        )
-    
-    def forward(self, tweets_text_list):
-        """
-        Args:
-            tweets_text_list: List[List[str]]
-                - 每个元素是一个用户的推文列表（字符串列表）
-                - 例如: [["tweet1 text", "tweet2 text", ...], ["tweet1 text", ...], ...]
-        """
-        batch_size = len(tweets_text_list) # 前向传播时当前batch的用户数量
-        batch_expert_reprs = [] # 每个用户的tweets专家表示
-        device = next(self.parameters()).device
-        
-        # 对每个用户的多条推文进行处理
-        for user_idx in range(batch_size):
-            user_tweets = tweets_text_list[user_idx]  # 该用户的所有推文（字符串列表）
-            
-            # 如果用户没有推文（空列表），使用零向量
-            if len(user_tweets) == 0 or (len(user_tweets) == 1 and user_tweets[0] == ''):
-                expert_repr = torch.zeros(self.mlp[-1].out_features, device=device)
-                batch_expert_reprs.append(expert_repr)
-                continue
-            
-            # 清理推文文本
-            cleaned_tweets = []
-            for tweet_text in user_tweets:
-                tweet_text = str(tweet_text).strip()
-                if tweet_text != '' and tweet_text != 'None':
-                    cleaned_tweets.append(tweet_text)
-            
-            if len(cleaned_tweets) == 0:
-                user_expert_repr = torch.zeros(self.mlp[-1].out_features, device=device)
-                batch_expert_reprs.append(user_expert_repr)
-                continue
-            
-            # 批量处理该用户的所有推文（提高效率）
-            with torch.no_grad():  # 不计算梯度，因为不微调 RoBERTa
-                # Tokenize 所有推文
-                encoded = self.roberta_tokenizer(
-                    cleaned_tweets,
-                    max_length=128,
-                    padding=True,
-                    truncation=True,
-                    return_tensors='pt'
-                )
-                
-                # 移动到正确设备
-                input_ids = encoded['input_ids'].to(self.roberta_model.device)
-                attention_mask = encoded['attention_mask'].to(self.roberta_model.device)
-
-                # 使用 RoBERTa 提取特征
-                outputs = self.roberta_model(input_ids=input_ids, attention_mask=attention_mask)
-                # outputs.last_hidden_state: [num_tweets, seq_len, 768]
-                hidden_states = outputs.last_hidden_state  # [num_tweets, seq_len, 768]
-                
-                # 对每条推文的所有词向量取平均，得到句向量
-                # 使用 attention_mask 来正确计算平均值（忽略 padding）
-                attention_mask_expanded = attention_mask.unsqueeze(-1).float()  # [num_tweets, seq_len, 1]
-                masked_hidden = hidden_states * attention_mask_expanded  # [num_tweets, seq_len, 768]
-                sum_hidden = masked_hidden.sum(dim=1)  # [num_tweets, 768] - 每条推文的词向量和
-                sum_mask = attention_mask_expanded.sum(dim=1)  # [num_tweets, 1] - 每条推文的有效词数
-                sentence_vectors = sum_hidden / sum_mask.clamp(min=1)  # [num_tweets, 768] - 平均得到句向量
-            
-            # 将句向量移动到模型设备
-            sentence_vectors = sentence_vectors.to(device)
-
-            # MLP: 768维 → 64维 Expert Representation（批量处理）
-            tweet_expert_reprs = self.mlp(sentence_vectors)  # [num_tweets, 64]
-            
-            # 对所有推文的专家表示做平均聚合
-            user_expert_repr = torch.mean(tweet_expert_reprs, dim=0)  # [64] - 平均聚合
-            
-            batch_expert_reprs.append(user_expert_repr)
-        
-        # 将该batch中每个用户的表示拼成张量（batch_size*64的矩阵）
-        expert_repr = torch.stack(batch_expert_reprs, dim=0)  # [batch_size, 64]
-        
-        # Bot Probability 预测
-        bot_prob = self.bot_classifier(expert_repr)  # [batch_size, 1]
-        
-        return expert_repr, bot_prob
-
-    # 只获取专家表示，不计算 bot 概率
-    def get_expert_repr(self, tweets_text_list):
-        expert_repr, _ = self.forward(tweets_text_list)
-        return expert_repr
 
 
 # 图专家模型 (单 MLP 版本)

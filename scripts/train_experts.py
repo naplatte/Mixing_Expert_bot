@@ -209,7 +209,7 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练社交机器人检测专家模型')
     parser.add_argument('--expert', type=str, default='all',
-                        help='要训练的专家 (des, post, tweets, cat, num, graph, all)')
+                        help='要训练的专家 (des, post, cat, num, graph, all)')
     parser.add_argument('--dataset_path', type=str, default=None,
                         help='数据集路径')
     parser.add_argument('--checkpoint_dir', type=str, default='../../autodl-fs/model',
@@ -241,9 +241,6 @@ def main():
     parser.add_argument('--num_top_k', type=int, default=1,
                         help='Num Expert MoE Top-K 选择数量 (默认1)')
 
-    # 旧版 Tweets Expert 参数 (保留兼容)
-    parser.add_argument('--roberta_model', type=str, default='distilroberta-base',
-                        help='RoBERTa模型名称 (用于旧版 Tweets Expert)')
 
     # Graph Expert 参数 (MoE 版本) - 2选1
     parser.add_argument('--graph_embedding_dim', type=int, default=128,
@@ -289,8 +286,6 @@ def main():
         # Num Expert MoE 参数 (3选1)
         'num_num_experts': args.num_num_experts,
         'num_top_k': args.num_top_k,
-        # 旧版 Tweets Expert 参数 (兼容)
-        'roberta_model_name': args.roberta_model,
         # Graph Expert 参数 (MoE 版本)
         'embedding_dim': args.graph_embedding_dim,
         'graph_num_experts': args.graph_num_experts,
