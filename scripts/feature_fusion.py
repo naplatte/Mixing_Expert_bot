@@ -20,10 +20,8 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
+# 分层融合数据集 - 支持缺失数据掩码
 class HierarchicalFusionDataset(Dataset):
-    """分层融合数据集 - 支持缺失数据掩码"""
-
     def __init__(self, cat_embeddings, num_embeddings, des_embeddings, post_embeddings,
                  des_mask, post_mask, labels, mode='train'):
         """
@@ -49,15 +47,34 @@ class HierarchicalFusionDataset(Dataset):
         # 统计有效数据
         valid_des = self.des_mask.sum().item()
         valid_post = self.post_mask.sum().item()
-        both_valid = (self.des_mask & self.post_mask).sum().item()
+        both_valid = (self.des_mask & self.post_mask).sum().item() # 同时有描述和推文的样本数量
 
         print(f"  [{mode}集] 样本数量: {len(self.labels)}")
         print(f"    有效描述: {valid_des}/{len(self.labels)} ({valid_des/len(self.labels)*100:.1f}%)")
         print(f"    有效推文: {valid_post}/{len(self.labels)} ({valid_post/len(self.labels)*100:.1f}%)")
         print(f"    两者都有: {both_valid}/{len(self.labels)} ({both_valid/len(self.labels)*100:.1f}%)")
+        """
+        [train集]
+        样本数量: 8278
+        有效描述: 7205 / 8278(87.0 %)
+        有效推文: 8223 / 8278(99.3 %)
+        两者都有: 7173 / 8278(86.7 %)
+    
+        [val集]
+        样本数量: 2365
+        有效描述: 2066 / 2365(87.4 %)
+        有效推文: 2350 / 2365(99.4 %)
+        两者都有: 2060 / 2365(87.1 %)
+
+        [test集]
+        样本数量: 1183
+        有效描述: 1032 / 1183(87.2 %)
+        有效推文: 1173 / 1183(99.2 %)
+        两者都有: 1027 / 1183(86.8 %)
+        """
 
     def __len__(self):
-        return len(self.labels)
+            return len(self.labels)
 
     def __getitem__(self, idx):
         return {
@@ -74,8 +91,6 @@ class HierarchicalFusionDataset(Dataset):
 class HierarchicalFusionExpert(nn.Module):
     """
     分层融合专家模型
-
-    架构：
     1. 第一层：属性融合 (Cat + Num) -> Property Representation (64d)
     2. 第二层：内容融合 (Des + Post) -> Content Representation (64d)
     3. 第三层：综合融合 (Property + Content) -> Final Representation (64d)
@@ -135,6 +150,7 @@ class HierarchicalFusionExpert(nn.Module):
 
         # ========== 第三层：注意力加权综合融合 ==========
         # 注意力网络：计算property和content的重要性权重
+        # 先保留，一会看看怎么用的
         self.attention = nn.Sequential(
             nn.Linear(expert_dim * 2, 128),
             nn.Tanh(),
