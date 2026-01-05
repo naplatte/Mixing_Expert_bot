@@ -12,10 +12,27 @@ python train_experts.py --expert cat --num_epochs 10
 
 python train_experts.py --expert num --num_epochs 10
 
-python gate_rl.py --epochs 20 --diversity_coef 0.9 --entropy_coef 0.9 --lr 1e-6
+python gate.py --degree_threshold 5
 
 自定义参数
 python train_experts.py --expert des,tweets --num_epochs 15 --batch_size 64
 
 查看所有参数
 python train_experts.py --help
+
+chmod +x test_thresholds.sh
+./test_thresholds.sh
+
+Mixing_Expert_bot/
+├── configs/
+│   └── expert_configs.py
+├── scripts/
+│   ├── gate.py
+│   ├── iso_and_nonisol.py
+│   ├── feature_fusion.py
+│   ├── train_experts.py
+│   └── expert_trainer.py   
+├── src/
+│   ├── dataset.py
+│   ├── model.py
+│   └── metrics.py

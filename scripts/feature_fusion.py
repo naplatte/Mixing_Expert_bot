@@ -148,23 +148,14 @@ class HierarchicalFusionExpert(nn.Module):
             nn.Dropout(dropout)
         ).to(self.device)
 
-        # ========== 第三层：注意力加权综合融合 ==========
-        # 注意力网络：计算property和content的重要性权重
-        # 先保留，一会看看怎么用的
-        self.attention = nn.Sequential(
-            nn.Linear(expert_dim * 2, 128),
-            nn.Tanh(),
-            nn.Linear(128, 2),
-            nn.Softmax(dim=-1)
-        ).to(self.device)
-
-        # 最终融合层
+        # ========== 第三层：直接拼接融合（不使用注意力机制）==========
+        # 直接拼接 property_repr (64d) + content_repr (64d) = 128d，然后MLP降维到64d
         self.final_fusion = nn.Sequential(
-            nn.Linear(expert_dim * 3, 128),  # 修改为 expert_dim * 3 = 192 维输入
+            nn.Linear(expert_dim * 2, 128),  # 128d -> 128d
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, expert_dim),
+            nn.Linear(128, expert_dim),      # 128d -> 64d
             nn.LayerNorm(expert_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
@@ -196,15 +187,15 @@ class HierarchicalFusionExpert(nn.Module):
         """
         batch_size = cat_repr.shape[0]
 
-        # ========== 第一层：属性融合 ==========
+        # ========== 第一层：类别数据 + 数值数据（拼接+降维）==========
         property_repr = self.property_fusion(
             torch.cat([cat_repr, num_repr], dim=1)
         )  # [B, 64]
 
-        # ========== 第二层：内容融合（处理缺失数据）==========
+        # ========== 第二层：简介文本 + 推文文本 ==========
         content_repr = torch.zeros(batch_size, self.expert_dim, device=self.device)
 
-        # 情况1：Des和Post都有效
+        # 情况1：Des和Post都有效（拼接 + MLP降维 128->64）
         both_valid = des_mask & post_mask
         if both_valid.any():
             content_repr[both_valid] = self.content_fusion(
@@ -223,21 +214,10 @@ class HierarchicalFusionExpert(nn.Module):
 
         # 情况4：都无效 - content_repr保持为零向量（已初始化）
 
-        # ========== 第三层：注意力加权综合融合 ==========
-        # 计算注意力权重
-        concat = torch.cat([property_repr, content_repr], dim=1)
-        attn_weights = self.attention(concat)  # [B, 2]
-
-        # 加权融合
-        weighted = (
-                attn_weights[:, 0:1] * property_repr +
-                attn_weights[:, 1:2] * content_repr
-        )
-
-        # 最终融合（结合加权结果和原始拼接）
-        final_repr = self.final_fusion(
-            torch.cat([weighted, concat], dim=1)
-        )  # [B, 64]
+        # ========== 第三层：直接拼接融合 ==========
+        # 直接拼接 property_repr 和 content_repr，然后通过 MLP 降维
+        concat = torch.cat([property_repr, content_repr], dim=1)  # [B, 128]
+        final_repr = self.final_fusion(concat)  # [B, 64]
 
         # ========== 分类预测 ==========
         bot_prob = self.bot_classifier(final_repr)  # [B, 1]
@@ -248,11 +228,12 @@ class HierarchicalFusionExpert(nn.Module):
     def forward_with_attention(self, cat_repr, num_repr, des_repr, post_repr, des_mask, post_mask):
         """
         带注意力权重的前向传播（用于分析）
+        注意：当前版本使用直接拼接而非注意力机制，返回的权重为均等权重以保持接口兼容
 
         Returns:
             final_repr: [B, 64] 最终融合表示
             bot_prob: [B, 1] bot概率
-            attn_weights: [B, 2] 注意力权重 (property, content)
+            attn_weights: [B, 2] 均等权重 (0.5, 0.5) - 保持接口兼容
         """
         batch_size = cat_repr.shape[0]
 
@@ -278,20 +259,14 @@ class HierarchicalFusionExpert(nn.Module):
         if only_post.any():
             content_repr[only_post] = self.post_encoder(post_repr[only_post])
 
-        # 第三层：注意力加权融合
+        # 第三层：直接拼接融合
         concat = torch.cat([property_repr, content_repr], dim=1)
-        attn_weights = self.attention(concat)
-
-        weighted = (
-                attn_weights[:, 0:1] * property_repr +
-                attn_weights[:, 1:2] * content_repr
-        )
-
-        final_repr = self.final_fusion(
-            torch.cat([weighted, concat], dim=1)
-        )
+        final_repr = self.final_fusion(concat)
 
         bot_prob = self.bot_classifier(final_repr)
+
+        # 返回均等权重以保持接口兼容
+        attn_weights = torch.ones(batch_size, 2, device=self.device) * 0.5
 
         # 返回3个值（包含注意力权重）
         return final_repr, bot_prob, attn_weights
@@ -553,7 +528,7 @@ def main():
     history = trainer.train(
         num_epochs=args.num_epochs,
         save_embeddings=True,
-        embeddings_dir='../../autodl-fs/labeled_embedding'
+        embeddings_dir='../../autodl-fs/labeled_embedding/fusion'
     )
 
     print(f"\n{'=' * 60}")
