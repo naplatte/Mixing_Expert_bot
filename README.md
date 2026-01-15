@@ -12,7 +12,7 @@ python train_experts.py --expert cat --num_epochs 10
 
 python train_experts.py --expert num --num_epochs 10
 
-python gate.py --degree_threshold 5
+python train_cat_num_experts.py --expert both --epochs 10
 
 自定义参数
 python train_experts.py --expert des,tweets --num_epochs 15 --batch_size 64
@@ -31,7 +31,7 @@ Mixing_Expert_bot/
 │   ├── iso_and_nonisol.py
 │   ├── feature_fusion.py
 │   ├── train_experts.py
-│   └── expert_trainer.py   
+│   └── expert_trainer.py
 ├── src/
 │   ├── dataset.py
 │   ├── model.py

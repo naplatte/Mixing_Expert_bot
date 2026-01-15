@@ -1,7 +1,4 @@
-"""
-专家配置模块
-定义各个专家的配置函数，包括数据集、模型、优化器等
-"""
+"""专家配置模块 - 支持Cat/Num/Des/Post/Graph专家的训练与全节点嵌入生成"""
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -10,480 +7,44 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.dataset import Twibot20
 from src.model import DesExpertMoE, PostExpert, GraphExpert, CatExpert, NumExpert
 
-# 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-# ==================== 辅助函数 ====================
-
-def _extract_expert_features_with_mask(expert_name, node_indices, dataset_path, checkpoint_dir, device, twibot_dataset=None):
-    """
-    从已训练的专家模型中提取特征
-
-    Args:
-        expert_name: 专家名称 ('des', 'post')
-        node_indices: 需要提取特征的节点索引列表
-        dataset_path: 数据集路径
-        checkpoint_dir: 模型检查点目录
-        device: 设备
-        twibot_dataset: 预加载的数据集（可选）
-
-    Returns:
-        embeddings: [num_nodes, expert_dim] 特征向量
-        mask: [num_nodes] bool tensor，标记哪些节点有有效特征
-    """
-    from tqdm import tqdm
-
-    # 加载数据集（如果未提供）
-    if twibot_dataset is None:
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-
-    # 加载已训练的专家模型
-    checkpoint_path = Path(checkpoint_dir) / f'{expert_name}_expert_best.pth'
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"未找到专家模型检查点: {checkpoint_path}")
-
-    print(f"    加载模型检查点: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    # 根据专家类型创建模型并加载权重
-    if expert_name == 'des':
-        model = DesExpertMoE(device=device).to(device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-
-        # 获取描述数据
-        descriptions = twibot_dataset.Des_preprocess()
-        if isinstance(descriptions, np.ndarray):
-            descriptions = descriptions.tolist()
-
-        # 提取特征
-        model.eval()
-        embeddings_list = []
-        valid_mask = []
-
-        batch_size = 32
-        with torch.no_grad():
-            for i in tqdm(range(0, len(node_indices), batch_size), desc=f"  提取 {expert_name} 特征"):
-                batch_indices = node_indices[i:i+batch_size]
-                batch_descriptions = [descriptions[idx] for idx in batch_indices]
-
-                # 检查是否有有效描述
-                batch_valid = []
-                for desc in batch_descriptions:
-                    desc_str = str(desc).strip()
-                    is_valid = desc_str != '' and desc_str.lower() != 'none'
-                    batch_valid.append(is_valid)
-
-                # 提取特征
-                expert_repr, _ = model(batch_descriptions)
-                embeddings_list.append(expert_repr.cpu())
-                valid_mask.extend(batch_valid)
-
-        embeddings = torch.cat(embeddings_list, dim=0)
-        mask = torch.tensor(valid_mask, dtype=torch.bool)
-
-    else:
-        raise ValueError(f"不支持的专家类型: {expert_name}")
-
-    print(f"    特征形状: {embeddings.shape}, 有效样本: {mask.sum().item()}/{len(mask)}")
-
-    return embeddings, mask
-
-
-# ==================== Description Expert ====================
-
-class DescriptionDataset(Dataset):
-    """Description 专家数据集"""
-    def __init__(self, descriptions, labels, mode='train'):
-        """
-        Args:
-            descriptions: 简介列表
-            labels: 标签列表
-            mode: 'train' | 'val' | 'test'
-                  所有阶段都过滤掉空简介的样本
-        """
+class SimpleDataset(Dataset):
+    def __init__(self, features, labels, mode='train', filter_fn=None, feature_key='features'):
         self.mode = mode
-
-        # 所有阶段都过滤掉空简介的样本
-        valid_indices = []
-        for idx, desc in enumerate(descriptions):
-            desc_str = str(desc).strip()
-            if desc_str != '' and desc_str.lower() != 'none':
-                valid_indices.append(idx)
-
-        self.descriptions = [descriptions[i] for i in valid_indices]
-        self.labels = [labels[i] for i in valid_indices]
-
-        filtered_count = len(descriptions) - len(self.descriptions)
-        print(f"  [{mode}集] 有效样本: {len(self.descriptions)}/{len(descriptions)} (过滤 {filtered_count} 个空简介样本)")
+        self.feature_key = feature_key
+        if filter_fn:
+            valid_idx = [i for i, f in enumerate(features) if filter_fn(f)]
+            self.features = [features[i] for i in valid_idx]
+            self.labels = [labels[i] for i in valid_idx]
+            print(f"  [{mode}集] 样本: {len(self.features)}/{len(features)} (过滤{len(features)-len(self.features)}个)")
+        else:
+            self.features = features if isinstance(features, list) else features
+            self.labels = labels
+            print(f"  [{mode}集] 样本: {len(self.labels)}")
 
     def __len__(self):
-        return len(self.descriptions)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        description = str(self.descriptions[idx])
+        feat = self.features[idx]
         label = self.labels[idx]
+        if not isinstance(feat, torch.Tensor):
+            if isinstance(feat, (list, str)):
+                return {self.feature_key: feat, 'label': torch.tensor(label, dtype=torch.float32)}
+            feat = torch.tensor(feat, dtype=torch.float32)
+        if not isinstance(label, torch.Tensor):
+            label = torch.tensor(label, dtype=torch.float32)
+        return {self.feature_key: feat, 'label': label}
 
-        return {
-            'description_text': description,
-            'label': torch.tensor(label, dtype=torch.float32)
-        }
-
-
-def create_des_expert_config(
-    dataset_path=None,
-    batch_size=32,
-    learning_rate=5e-4,
-    weight_decay=0.01,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    model_name='microsoft/deberta-v3-base',
-    max_grad_norm=1.0,
-    dropout=0.3,
-    early_stopping_patience=4,
-    twibot_dataset=None,
-    **kwargs  # 忽略其他参数（兼容旧配置）
-):
-    """
-    创建 Description Expert 配置 (单 MLP 版本)
-
-    Args:
-        model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
-        batch_size: 批次大小，默认32
-        learning_rate: 学习率，默认5e-4
-        weight_decay: 权重衰减，默认0.01
-        dropout: Dropout率，默认0.3
-        max_grad_norm: 梯度裁剪阈值，默认1.0
-        early_stopping_patience: 早停耐心值，默认4
-        twibot_dataset: 预加载的Twibot20数据集对象（可选）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Description Expert (单 MLP 版本)")
-    print(f"{'='*60}")
-    print(f"  模型: {model_name}")
-    print(f"  批次大小: {batch_size}")
-    print(f"  学习率: {learning_rate}")
-    print(f"  权重衰减: {weight_decay}")
-    print(f"  Dropout: {dropout}")
-    print(f"  梯度裁剪: {max_grad_norm}")
-    print(f"  早停耐心值: {early_stopping_patience}")
-
-    # 加载数据（如果没有预加载）
-    if twibot_dataset is None:
-        print("加载数据...")
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("使用预加载的数据集...")
-
-    descriptions = twibot_dataset.Des_preprocess()
-    labels = twibot_dataset.load_labels()
-
-    if isinstance(descriptions, np.ndarray):
-        descriptions = descriptions.tolist()
-    labels = labels.cpu().numpy()
-
-    # 获取训练/验证/测试集索引
-    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
-
-    # 划分数据集
-    train_descriptions = [descriptions[i] for i in train_idx]
-    train_labels = labels[train_idx]
-
-    val_descriptions = [descriptions[i] for i in val_idx]
-    val_labels = labels[val_idx]
-
-    test_descriptions = [descriptions[i] for i in test_idx]
-    test_labels = labels[test_idx]
-
-    print(f"  训练集: {len(train_descriptions)} 样本")
-    print(f"  验证集: {len(val_descriptions)} 样本")
-    print(f"  测试集: {len(test_descriptions)} 样本")
-
-    # 创建数据集和数据加载器
-    print("创建数据加载器...")
-    train_dataset = DescriptionDataset(train_descriptions, train_labels, mode='train')
-    val_dataset = DescriptionDataset(val_descriptions, val_labels, mode='val')
-    test_dataset = DescriptionDataset(test_descriptions, test_labels, mode='test')
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    # 初始化模型 (单 MLP 版本)
-    print("初始化单 MLP 模型...")
-    model = DesExpertMoE(
-        model_name=model_name,
-        device=device,
-        dropout=dropout,
-        expert_dim=64,
-        hidden_dim=768
-    ).to(device)
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-    # 优化器和损失函数 - 使用权重衰减
-    optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=learning_rate,
-        weight_decay=weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-    criterion = nn.BCELoss()
-
-    # 数据提取函数
-    def extract_fn(batch, device):
-        description_texts = batch['description_text']
-        labels = batch['label'].to(device).unsqueeze(1)
-        return (description_texts,), labels
-
-    return {
-        'name': 'des',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn,
-        'max_grad_norm': max_grad_norm,  # 梯度裁剪
-        'early_stopping_patience': early_stopping_patience,  # 早停
-        'batch_size': batch_size,
-        'learning_rate': learning_rate,
-        'dropout': dropout
-    }
-
-
-# ==================== Post Expert (单 MLP 版本) ====================
-
-class PostDataset(Dataset):
-    """Post Expert 数据集"""
-    def __init__(self, posts_list, labels, mode='train'):
-        """
-        Args:
-            posts_list: 推文列表
-            labels: 标签列表
-            mode: 'train' | 'val' | 'test'
-                  所有阶段都过滤掉没有推文的样本
-        """
-        self.mode = mode
-
-        # 所有阶段都过滤掉没有推文的样本
-        valid_indices = []
-        for idx, user_posts in enumerate(posts_list):
-            cleaned = self._clean_posts(user_posts)
-            if len(cleaned) > 0:
-                valid_indices.append(idx)
-
-        self.posts_list = [posts_list[i] for i in valid_indices]
-        self.labels = [labels[i] for i in valid_indices]
-
-        filtered_count = len(posts_list) - len(self.posts_list)
-        print(f"  [{mode}集] 有效样本: {len(self.posts_list)}/{len(posts_list)} (过滤 {filtered_count} 个无推文样本)")
-
-    def _clean_posts(self, user_posts):
-        """清理推文文本"""
-        cleaned = []
-        if isinstance(user_posts, list):
-            for post in user_posts:
-                post_str = str(post).strip()
-                if post_str != '' and post_str.lower() != 'none':
-                    cleaned.append(post_str)
-        return cleaned
-
-    def __len__(self):
-        return len(self.posts_list)
-
-    def __getitem__(self, idx):
-        user_posts = self.posts_list[idx]
-        label = self.labels[idx]
-
-        # 清理推文文本（保证非空）
-        cleaned_posts = self._clean_posts(user_posts)
-
-        return {
-            'posts_text': cleaned_posts,
-            'label': torch.tensor(label, dtype=torch.float32)
-        }
-
-
-def collate_posts_fn(batch):
-    """将一个 batch 中每个样本的推文文本列表和标签整理成字典供模型输入"""
-    posts_text_lists = [item['posts_text'] for item in batch]
-    labels = torch.stack([item['label'] for item in batch])
-
-    return {
-        'posts_text_list': posts_text_lists,
-        'label': labels
-    }
-
-
-def create_post_expert_config(
-    dataset_path=None,
-    batch_size=32,
-    learning_rate=5e-4,
-    weight_decay=0.01,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    model_name='microsoft/deberta-v3-base',
-    max_grad_norm=1.0,
-    dropout=0.3,
-    early_stopping_patience=4,
-    twibot_dataset=None,
-    **kwargs  # 忽略其他参数（兼容旧配置）
-):
-    """
-    创建 Post Expert 配置 (单 MLP 版本)
-
-    Args:
-        model_name: 预训练模型名称，默认为 'microsoft/deberta-v3-base'
-        batch_size: 批次大小，默认32
-        learning_rate: 学习率，默认5e-4
-        weight_decay: 权重衰减，默认0.01
-        dropout: Dropout率，默认0.3
-        max_grad_norm: 梯度裁剪阈值，默认1.0
-        early_stopping_patience: 早停耐心值，默认4
-        twibot_dataset: 预加载的Twibot20数据集对象（可选）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Post Expert (单 MLP 版本)")
-    print(f"{'='*60}")
-    print(f"  模型: {model_name}")
-    print(f"  批次大小: {batch_size}")
-    print(f"  学习率: {learning_rate}")
-    print(f"  权重衰减: {weight_decay}")
-    print(f"  Dropout: {dropout}")
-    print(f"  梯度裁剪: {max_grad_norm}")
-    print(f"  早停耐心值: {early_stopping_patience}")
-
-    # 加载数据（如果没有预加载）
-    if twibot_dataset is None:
-        print("加载数据...")
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("使用预加载的数据集...")
-
-    posts_list = twibot_dataset.tweets_preprogress()  # 复用原有的推文加载方法
-    labels = twibot_dataset.load_labels()
-
-    if isinstance(posts_list, np.ndarray):
-        posts_list = posts_list.tolist()
-    labels = labels.cpu().numpy()
-
-    # 获取训练/验证/测试集索引
-    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
-
-    # 划分数据集
-    train_posts = [posts_list[i] for i in train_idx]
-    train_labels = labels[train_idx]
-
-    val_posts = [posts_list[i] for i in val_idx]
-    val_labels = labels[val_idx]
-
-    test_posts = [posts_list[i] for i in test_idx]
-    test_labels = labels[test_idx]
-
-    print(f"  训练集: {len(train_posts)} 样本")
-    print(f"  验证集: {len(val_posts)} 样本")
-    print(f"  测试集: {len(test_posts)} 样本")
-
-    # 统计推文数量
-    train_post_counts = [len(posts) if isinstance(posts, list) else 0 for posts in train_posts]
-    print(f"  训练集平均推文数: {np.mean(train_post_counts):.2f}")
-
-    # 创建数据集和数据加载器
-    print("创建数据加载器...")
-    train_dataset = PostDataset(train_posts, train_labels, mode='train')
-    val_dataset = PostDataset(val_posts, val_labels, mode='val')
-    test_dataset = PostDataset(test_posts, test_labels, mode='test')
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_posts_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_posts_fn)
-
-    # 初始化模型 (单 MLP 版本)
-    print("初始化单 MLP 模型...")
-    model = PostExpert(
-        model_name=model_name,
-        device=device,
-        dropout=dropout,
-        expert_dim=64,
-        hidden_dim=768
-    ).to(device)
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-    # 优化器和损失函数 - 使用权重衰减
-    optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=learning_rate,
-        weight_decay=weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-    criterion = nn.BCELoss()
-
-    # 数据提取函数
-    def extract_fn(batch, device):
-        posts_text_list = batch['posts_text_list']
-        labels = batch['label'].to(device).unsqueeze(1)
-        return (posts_text_list,), labels
-
-    return {
-        'name': 'post',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn,
-        'max_grad_norm': max_grad_norm,
-        'early_stopping_patience': early_stopping_patience,
-        'batch_size': batch_size,
-        'learning_rate': learning_rate,
-        'dropout': dropout
-    }
-
-
-# ==================== Graph Expert ====================
 
 class GraphDataset(Dataset):
-    """Graph Expert 数据集"""
     def __init__(self, node_indices, labels):
-        """
-        Args:
-            node_indices: 节点索引列表
-            labels: 标签列表
-        """
         self.node_indices = node_indices
         self.labels = labels
 
@@ -497,564 +58,234 @@ class GraphDataset(Dataset):
         }
 
 
-def collate_graph_fn(batch):
-    """图数据 collate 函数"""
-    node_indices = torch.stack([item['node_index'] for item in batch])
-    labels = torch.stack([item['label'] for item in batch])
-
+def collate_posts_fn(batch):
     return {
-        'node_indices': node_indices,
-        'label': labels
+        'posts_text_list': [item['features'] for item in batch],
+        'label': torch.stack([item['label'] for item in batch])
     }
 
 
-def create_graph_expert_config(
-    dataset_path=None,
-    batch_size=128,
-    learning_rate=1e-3,
-    weight_decay=1e-4,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    embedding_dim=128,
-    expert_dim=64,
-    dropout=0.3,
-    max_grad_norm=1.0,
-    early_stopping_patience=5,
-    twibot_dataset=None,
-    **kwargs  # 忽略其他参数（兼容旧配置）
-):
-    """
-    创建 Graph Expert 配置 (单 MLP 版本)
+def collate_graph_fn(batch):
+    return {
+        'node_indices': torch.stack([item['node_index'] for item in batch]),
+        'label': torch.stack([item['label'] for item in batch])
+    }
 
-    节点特征从 node_embedding.py 生成的128维特征加载，使用 RGCN + 单个 MLP
 
-    Args:
-        embedding_dim: RGCN隐藏层维度，默认128
-        expert_dim: 专家输出维度，默认64
-        max_grad_norm: 梯度裁剪阈值，默认1.0
-        early_stopping_patience: 早停耐心值，默认5
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Graph Expert (单 MLP 版本)")
-    print(f"{'='*60}")
-    print(f"  批次大小: {batch_size}")
-    print(f"  学习率: {learning_rate}")
-    print(f"  权重衰减: {weight_decay}")
-    print(f"  Hidden size (embedding_dim): {embedding_dim}")
-    print(f"  Dropout: {dropout}")
-    print(f"  梯度裁剪: {max_grad_norm}")
-    print(f"  早停耐心值: {early_stopping_patience}")
-
-    # 加载数据（如果没有预加载）
+def _load_dataset(dataset_path, device, twibot_dataset=None):
     if twibot_dataset is None:
-        print("\n加载数据集和图结构...")
+        print("加载数据...")
         twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("\n使用预加载的数据集和图结构...")
+    return twibot_dataset
 
-    labels = twibot_dataset.load_labels()
-    labels = labels.cpu().numpy()
 
-    # 构建图结构
-    edge_index, edge_type = twibot_dataset.build_graph()
-    print(f"  图边数: {edge_index.shape[1]}")
-    print(f"  边类型数: {len(torch.unique(edge_type))}")
-
-    # 获取训练/验证/测试集索引
+def _get_splits(twibot_dataset):
     train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
+    return list(train_idx), list(val_idx), list(test_idx)
 
-    print(f"  训练集: {len(train_idx)} 节点")
-    print(f"  验证集: {len(val_idx)} 节点")
-    print(f"  测试集: {len(test_idx)} 节点")
 
-    # ========== 节点特征：GraphExpert会自动从embedding_dir加载4个pt文件 ==========
-    # 注意：需要对全部节点（包括支持集）加载特征
-    # df_data 包含所有节点（train + val + test + support）
-    num_all_nodes = len(twibot_dataset.df_data)
-    print(f"  总节点数（含支持集）: {num_all_nodes}")
+def _create_loaders(train_data, val_data, test_data, train_labels, val_labels, test_labels,
+                    batch_size, dataset_class=SimpleDataset, filter_fn=None,
+                    collate_fn=None, feature_key='features'):
+    train_ds = dataset_class(train_data, train_labels, 'train', filter_fn, feature_key) if dataset_class == SimpleDataset \
+               else dataset_class(train_data, train_labels)
+    val_ds = dataset_class(val_data, val_labels, 'val', filter_fn, feature_key) if dataset_class == SimpleDataset \
+             else dataset_class(val_data, val_labels)
+    test_ds = dataset_class(test_data, test_labels, 'test', filter_fn, feature_key) if dataset_class == SimpleDataset \
+              else dataset_class(test_data, test_labels)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    return train_loader, val_loader, test_loader
 
-    # embedding文件目录
-    embedding_dir = '../../autodl-fs/node_embedding'
 
-    # 创建数据集和数据加载器（只用带标签的节点）
-    print("\n创建数据加载器...")
-    train_labels = labels[train_idx]
-    val_labels = labels[val_idx]
-    test_labels = labels[test_idx]
+def _build_config(name, model, train_loader, val_loader, test_loader,
+                  extract_fn, device, checkpoint_dir, learning_rate, weight_decay=0.01,
+                  max_grad_norm=1.0, early_stopping_patience=5, **extra):
+    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                      lr=learning_rate, weight_decay=weight_decay)
+    return {
+        'name': name,
+        'model': model,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'optimizer': optimizer,
+        'criterion': nn.BCELoss(),
+        'device': device,
+        'checkpoint_dir': checkpoint_dir,
+        'extract_fn': extract_fn,
+        'max_grad_norm': max_grad_norm,
+        'early_stopping_patience': early_stopping_patience,
+        **extra
+    }
 
-    train_dataset = GraphDataset(train_idx, train_labels)
-    val_dataset = GraphDataset(val_idx, val_labels)
-    test_dataset = GraphDataset(test_idx, test_labels)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_graph_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
+def create_des_expert_config(dataset_path=None, batch_size=32, learning_rate=5e-4,
+                              device='cuda', checkpoint_dir='../../autodl-fs/model',
+                              dropout=0.3, twibot_dataset=None, **kwargs):
+    dataset_path = dataset_path or str(PROJECT_ROOT / 'processed_data')
+    print(f"\n{'='*60}\n配置 Description Expert\n{'='*60}")
+    twibot = _load_dataset(dataset_path, device, twibot_dataset)
+    descriptions = twibot.Des_preprocess()
+    labels = twibot.load_labels().cpu().numpy()
+    if isinstance(descriptions, np.ndarray):
+        descriptions = descriptions.tolist()
+    train_idx, val_idx, test_idx = _get_splits(twibot)
 
-    # 初始化模型 (单 MLP 版本，自动加载4个embedding文件)
-    print("\n初始化 Graph Expert 模型...")
-    model = GraphExpert(
-        num_nodes=num_all_nodes,
-        embedding_dir=embedding_dir,  # 4个pt文件所在目录
-        num_relations=2,  # following (0) 和 follower (1)
-        embedding_dim=embedding_dim,
-        expert_dim=expert_dim,
-        dropout=dropout,
-        device=device
-    ).to(device)
+    def is_valid(desc):
+        s = str(desc).strip()
+        return s and s.lower() != 'none'
 
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    train_loader, val_loader, test_loader = _create_loaders(
+        [descriptions[i] for i in train_idx], [descriptions[i] for i in val_idx],
+        [descriptions[i] for i in test_idx],
+        labels[train_idx], labels[val_idx], labels[test_idx],
+        batch_size, filter_fn=is_valid, feature_key='description_text'
+    )
+    model = DesExpertMoE(device=device, dropout=dropout).to(device)
+    print(f"  模型参数: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-    # 优化器和损失函数
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    criterion = nn.BCELoss()
+    def extract_fn(batch, device):
+        return (batch['description_text'],), batch['label'].to(device).unsqueeze(1)
 
-    # 数据提取函数
+    return _build_config('des', model, train_loader, val_loader, test_loader,
+                        extract_fn, device, checkpoint_dir, learning_rate)
+
+
+def create_post_expert_config(dataset_path=None, batch_size=32, learning_rate=5e-4,
+                               device='cuda', checkpoint_dir='../../autodl-fs/model',
+                               dropout=0.3, twibot_dataset=None, **kwargs):
+    dataset_path = dataset_path or str(PROJECT_ROOT / 'processed_data')
+    print(f"\n{'='*60}\n配置 Post Expert\n{'='*60}")
+    twibot = _load_dataset(dataset_path, device, twibot_dataset)
+    posts = twibot.tweets_preprogress()
+    labels = twibot.load_labels().cpu().numpy()
+    if isinstance(posts, np.ndarray):
+        posts = posts.tolist()
+    train_idx, val_idx, test_idx = _get_splits(twibot)
+
+    def is_valid(user_posts):
+        if isinstance(user_posts, list):
+            cleaned = [str(p).strip() for p in user_posts if str(p).strip() and str(p).lower() != 'none']
+            return len(cleaned) > 0
+        return False
+
+    train_loader, val_loader, test_loader = _create_loaders(
+        [posts[i] for i in train_idx], [posts[i] for i in val_idx], [posts[i] for i in test_idx],
+        labels[train_idx], labels[val_idx], labels[test_idx],
+        batch_size, filter_fn=is_valid, collate_fn=collate_posts_fn
+    )
+    model = PostExpert(device=device, dropout=dropout).to(device)
+    print(f"  模型参数: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
+    def extract_fn(batch, device):
+        return (batch['posts_text_list'],), batch['label'].to(device).unsqueeze(1)
+
+    return _build_config('post', model, train_loader, val_loader, test_loader,
+                        extract_fn, device, checkpoint_dir, learning_rate)
+
+
+def create_cat_expert_config(dataset_path=None, batch_size=64, learning_rate=1e-3,
+                              device='cuda', checkpoint_dir='../../autodl-fs/model',
+                              dropout=0.2, twibot_dataset=None, **kwargs):
+    """类别属性专家 - 3个属性: 是否私密、是否认证、是否默认头像"""
+    dataset_path = dataset_path or str(PROJECT_ROOT / 'processed_data')
+    print(f"\n{'='*60}\n配置 Category Expert (3个属性)\n{'='*60}")
+    twibot = _load_dataset(dataset_path, device, twibot_dataset)
+    cat_features = twibot.cat_prop_preprocess()
+    labels = twibot.load_labels().cpu().numpy()
+    if isinstance(cat_features, torch.Tensor):
+        cat_features = cat_features.cpu()
+    input_dim = cat_features.shape[1]
+    print(f"  类别属性维度: {input_dim}")
+    train_idx, val_idx, test_idx = _get_splits(twibot)
+    train_loader, val_loader, test_loader = _create_loaders(
+        cat_features[train_idx], cat_features[val_idx], cat_features[test_idx],
+        labels[train_idx], labels[val_idx], labels[test_idx],
+        batch_size, feature_key='cat_features'
+    )
+    model = CatExpert(input_dim=input_dim, dropout=dropout, device=device).to(device)
+    print(f"  模型参数: {sum(p.numel() for p in model.parameters()):,}")
+
+    def extract_fn(batch, device):
+        return (batch['cat_features'].to(device),), batch['label'].to(device).unsqueeze(1)
+
+    return _build_config('cat', model, train_loader, val_loader, test_loader,
+                        extract_fn, device, checkpoint_dir, learning_rate)
+
+
+def create_num_expert_config(dataset_path=None, batch_size=64, learning_rate=1e-3,
+                              device='cuda', checkpoint_dir='../../autodl-fs/model',
+                              dropout=0.2, twibot_dataset=None, **kwargs):
+    """数值属性专家 - 5个属性: followers/friends/statuses_count, screen_name_length, active_days"""
+    dataset_path = dataset_path or str(PROJECT_ROOT / 'processed_data')
+    print(f"\n{'='*60}\n配置 Numerical Expert (5个属性)\n{'='*60}")
+    twibot = _load_dataset(dataset_path, device, twibot_dataset)
+    num_features = twibot.num_prop_preprocess()
+    labels = twibot.load_labels().cpu().numpy()
+    if isinstance(num_features, torch.Tensor):
+        num_features = num_features.cpu()
+    input_dim = num_features.shape[1]
+    print(f"  数值属性维度: {input_dim}")
+    train_idx, val_idx, test_idx = _get_splits(twibot)
+    train_loader, val_loader, test_loader = _create_loaders(
+        num_features[train_idx], num_features[val_idx], num_features[test_idx],
+        labels[train_idx], labels[val_idx], labels[test_idx],
+        batch_size, feature_key='num_features'
+    )
+    model = NumExpert(input_dim=input_dim, dropout=dropout, device=device).to(device)
+    print(f"  模型参数: {sum(p.numel() for p in model.parameters()):,}")
+
+    def extract_fn(batch, device):
+        return (batch['num_features'].to(device),), batch['label'].to(device).unsqueeze(1)
+
+    return _build_config('num', model, train_loader, val_loader, test_loader,
+                        extract_fn, device, checkpoint_dir, learning_rate)
+
+
+def create_graph_expert_config(dataset_path=None, batch_size=128, learning_rate=1e-3,
+                                device='cuda', checkpoint_dir='../../autodl-fs/model',
+                                embedding_dim=128, dropout=0.3, twibot_dataset=None, **kwargs):
+    dataset_path = dataset_path or str(PROJECT_ROOT / 'processed_data')
+    print(f"\n{'='*60}\n配置 Graph Expert\n{'='*60}")
+    twibot = _load_dataset(dataset_path, device, twibot_dataset)
+    labels = twibot.load_labels().cpu().numpy()
+    edge_index, edge_type = twibot.build_graph()
+    print(f"  边数: {edge_index.shape[1]}")
+    train_idx, val_idx, test_idx = _get_splits(twibot)
+    num_all_nodes = len(twibot.df_data)
+    print(f"  总节点数: {num_all_nodes}")
+    train_ds = GraphDataset(train_idx, labels[train_idx])
+    val_ds = GraphDataset(val_idx, labels[val_idx])
+    test_ds = GraphDataset(test_idx, labels[test_idx])
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_graph_fn)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_fn)
+    model = GraphExpert(num_nodes=num_all_nodes, embedding_dim=embedding_dim,
+                        dropout=dropout, device=device).to(device)
+    print(f"  模型参数: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
     def extract_fn(batch, device):
         node_indices = batch['node_indices'].to(device)
         labels = batch['label'].to(device).unsqueeze(1)
-        # 图结构是全局的，不随 batch 变化
         return (node_indices, edge_index, edge_type), labels
 
-    return {
-        'name': 'graph',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn,
-        'max_grad_norm': max_grad_norm,
-        'early_stopping_patience': early_stopping_patience,
-        'edge_index': edge_index,  # 保存图结构供后续使用
-        'edge_type': edge_type,
-        'batch_size': batch_size,
-        'learning_rate': learning_rate,
-        'dropout': dropout,
-        'embedding_dim': embedding_dim
-    }
+    return _build_config('graph', model, train_loader, val_loader, test_loader,
+                        extract_fn, device, checkpoint_dir, learning_rate,
+                        edge_index=edge_index, edge_type=edge_type)
 
-
-# ==================== Cat Expert (类别属性专家 单 MLP 版本) ====================
-
-class CatDataset(Dataset):
-    """Category Property Expert 数据集"""
-    def __init__(self, cat_features, labels, mode='train'):
-        """
-        Args:
-            cat_features: 类别属性张量 [num_samples, num_cat_features]
-            labels: 标签列表
-            mode: 'train' | 'val' | 'test'
-        """
-        self.mode = mode
-        self.cat_features = cat_features
-        self.labels = labels
-
-        # 检查是否有全零行（可能表示缺失数据）
-        if isinstance(cat_features, torch.Tensor):
-            zero_rows = (cat_features.sum(dim=1) == 0).sum().item()
-        else:
-            zero_rows = (np.sum(cat_features, axis=1) == 0).sum()
-
-        print(f"  [{mode}集] 有效样本: {len(self.labels)} (全零特征样本: {zero_rows})")
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        cat_feat = self.cat_features[idx]
-        label = self.labels[idx]
-
-        # 确保返回tensor
-        if not isinstance(cat_feat, torch.Tensor):
-            cat_feat = torch.tensor(cat_feat, dtype=torch.float32)
-        if not isinstance(label, torch.Tensor):
-            label = torch.tensor(label, dtype=torch.float32)
-
-        return {
-            'cat_features': cat_feat,
-            'label': label
-        }
-
-
-def create_cat_expert_config(
-    dataset_path=None,
-    batch_size=64,
-    learning_rate=1e-3,
-    weight_decay=0.01,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    max_grad_norm=1.0,
-    dropout=0.2,
-    early_stopping_patience=5,
-    expert_dim=64,  # 专家输出维度
-    twibot_dataset=None,
-    **kwargs  # 忽略其他参数（兼容旧配置）
-):
-    """
-    创建 Category Property Expert 配置 (单 MLP 版本)
-
-    类别属性包括:
-        - protected, geo_enabled, verified, contributors_enabled
-        - is_translator, is_translation_enabled, profile_background_tile
-        - profile_use_background_image, has_extended_profile
-        - default_profile, default_profile_image
-
-    Args:
-        dataset_path: 数据集路径
-        batch_size: 批次大小，默认64
-        learning_rate: 学习率，默认1e-3
-        weight_decay: 权重衰减，默认0.01
-        dropout: Dropout率，默认0.2
-        max_grad_norm: 梯度裁剪阈值，默认1.0
-        early_stopping_patience: 早停耐心值，默认5
-        expert_dim: 专家输出维度，默认64
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Category Property Expert (单 MLP 版本)")
-    print(f"{'='*60}")
-    print(f"  批次大小: {batch_size}")
-    print(f"  学习率: {learning_rate}")
-    print(f"  权重衰减: {weight_decay}")
-    print(f"  Dropout: {dropout}")
-    print(f"  梯度裁剪: {max_grad_norm}")
-    print(f"  早停耐心值: {early_stopping_patience}")
-
-    # 加载数据（如果没有预加载）
-    if twibot_dataset is None:
-        print("加载数据...")
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("使用预加载的数据集...")
-
-    # 加载类别属性数据
-    cat_features = twibot_dataset.cat_prop_preprocess()  # [num_samples, 11]
-    labels = twibot_dataset.load_labels()
-
-    # 转换为CPU tensor/numpy
-    if isinstance(cat_features, torch.Tensor):
-        cat_features = cat_features.cpu()
-    labels = labels.cpu().numpy()
-
-    # 获取输入维度（类别属性数量）
-    input_dim = cat_features.shape[1]
-    print(f"  类别属性维度: {input_dim}")
-
-    # 获取训练/验证/测试集索引
-    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
-
-    # 划分数据集
-    train_cat = cat_features[train_idx]
-    train_labels = labels[train_idx]
-
-    val_cat = cat_features[val_idx]
-    val_labels = labels[val_idx]
-
-    test_cat = cat_features[test_idx]
-    test_labels = labels[test_idx]
-
-    print(f"  训练集: {len(train_idx)} 样本")
-    print(f"  验证集: {len(val_idx)} 样本")
-    print(f"  测试集: {len(test_idx)} 样本")
-
-    # 创建数据集和数据加载器
-    print("创建数据加载器...")
-    train_dataset = CatDataset(train_cat, train_labels, mode='train')
-    val_dataset = CatDataset(val_cat, val_labels, mode='val')
-    test_dataset = CatDataset(test_cat, test_labels, mode='test')
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    # 初始化模型 (单 MLP 版本)
-    print("初始化单 MLP 模型...")
-    model = CatExpert(
-        input_dim=input_dim,
-        expert_dim=expert_dim,
-        dropout=dropout,
-        device=device
-    ).to(device)
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-    # 优化器和损失函数 - 使用权重衰减
-    optimizer = AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-    criterion = nn.BCELoss()
-
-    # 数据提取函数
-    def extract_fn(batch, device):
-        cat_features = batch['cat_features'].to(device)
-        labels = batch['label'].to(device).unsqueeze(1)
-        return (cat_features,), labels
-
-    return {
-        'name': 'cat',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn,
-        'max_grad_norm': max_grad_norm,
-        'early_stopping_patience': early_stopping_patience,
-        'batch_size': batch_size,
-        'learning_rate': learning_rate,
-        'dropout': dropout,
-        'input_dim': input_dim
-    }
-
-
-# ==================== Numerical Property Expert ====================
-
-class NumDataset(Dataset):
-    """Numerical Property Expert 数据集"""
-    def __init__(self, num_features, labels, mode='train'):
-        """
-        Args:
-            num_features: 数值属性张量 [num_samples, num_features] (已标准化)
-            labels: 标签列表
-            mode: 'train' | 'val' | 'test'
-        """
-        self.mode = mode
-        self.num_features = num_features
-        self.labels = labels
-
-        print(f"  [{mode}集] 有效样本: {len(self.labels)}")
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        num_feat = self.num_features[idx]
-        label = self.labels[idx]
-
-        # 确保返回tensor
-        if not isinstance(num_feat, torch.Tensor):
-            num_feat = torch.tensor(num_feat, dtype=torch.float32)
-        if not isinstance(label, torch.Tensor):
-            label = torch.tensor(label, dtype=torch.float32)
-
-        return {
-            'num_features': num_feat,
-            'label': label
-        }
-
-
-def create_num_expert_config(
-    dataset_path=None,
-    batch_size=64,
-    learning_rate=1e-3,
-    weight_decay=0.01,
-    device='cuda',
-    checkpoint_dir='../../autodl-fs/model',
-    max_grad_norm=1.0,
-    dropout=0.2,
-    early_stopping_patience=5,
-    expert_dim=64,  # 专家输出维度
-    twibot_dataset=None,
-    **kwargs  # 忽略其他参数（兼容旧配置）
-):
-    """
-    创建 Numerical Property Expert 配置 (单 MLP 版本)
-
-    数值属性包括:
-        - followers_count (粉丝数)
-        - friends_count (关注数)
-        - favourites_count (点赞数)
-        - statuses_count (推文数)
-        - screen_name_length (用户名长度)
-        - active_days (账户活跃天数)
-
-    数据预处理:
-        - z-score 标准化: (x - mean) / std
-
-    Args:
-        dataset_path: 数据集路径
-        batch_size: 批次大小，默认64
-        learning_rate: 学习率，默认1e-3
-        weight_decay: 权重衰减，默认0.01
-        dropout: Dropout率，默认0.2
-        max_grad_norm: 梯度裁剪阈值，默认1.0
-        early_stopping_patience: 早停耐心值，默认5
-        expert_dim: 专家输出维度，默认64
-        twibot_dataset: 预加载的Twibot20数据集对象（可选，避免重复加载）
-
-    Returns:
-        dict: 包含模型、数据加载器、优化器等的配置字典
-    """
-    if dataset_path is None:
-        dataset_path = str(PROJECT_ROOT / 'processed_data')
-
-    print(f"\n{'='*60}")
-    print(f"配置 Numerical Property Expert (单 MLP 版本)")
-    print(f"{'='*60}")
-    print(f"  批次大小: {batch_size}")
-    print(f"  学习率: {learning_rate}")
-    print(f"  权重衰减: {weight_decay}")
-    print(f"  Dropout: {dropout}")
-    print(f"  梯度裁剪: {max_grad_norm}")
-    print(f"  早停耐心值: {early_stopping_patience}")
-
-    # 加载数据（如果没有预加载）
-    if twibot_dataset is None:
-        print("加载数据...")
-        twibot_dataset = Twibot20(root=dataset_path, device=device, process=True, save=True)
-    else:
-        print("使用预加载的数据集...")
-
-    # 加载数值属性数据（已经过 z-score 标准化）
-    num_features = twibot_dataset.num_prop_preprocess()  # [num_samples, 6]
-    labels = twibot_dataset.load_labels()
-
-    # 转换为CPU tensor/numpy
-    if isinstance(num_features, torch.Tensor):
-        num_features = num_features.cpu()
-    labels = labels.cpu().numpy()
-
-    # 获取输入维度（数值属性数量）
-    input_dim = num_features.shape[1]
-    print(f"  数值属性维度: {input_dim}")
-
-    # 获取训练/验证/测试集索引
-    train_idx, val_idx, test_idx = twibot_dataset.train_val_test_mask()
-    train_idx = list(train_idx)
-    val_idx = list(val_idx)
-    test_idx = list(test_idx)
-
-    # 划分数据集
-    train_num = num_features[train_idx]
-    train_labels = labels[train_idx]
-
-    val_num = num_features[val_idx]
-    val_labels = labels[val_idx]
-
-    test_num = num_features[test_idx]
-    test_labels = labels[test_idx]
-
-    print(f"  训练集: {len(train_idx)} 样本")
-    print(f"  验证集: {len(val_idx)} 样本")
-    print(f"  测试集: {len(test_idx)} 样本")
-
-    # 创建数据集和数据加载器
-    print("创建数据加载器...")
-    train_dataset = NumDataset(train_num, train_labels, mode='train')
-    val_dataset = NumDataset(val_num, val_labels, mode='val')
-    test_dataset = NumDataset(test_num, test_labels, mode='test')
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    # 初始化模型 (单 MLP 版本)
-    print("初始化单 MLP 模型...")
-    model = NumExpert(
-        input_dim=input_dim,
-        expert_dim=expert_dim,
-        dropout=dropout,
-        device=device
-    ).to(device)
-    print(f"  模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  可训练参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-    # 优化器和损失函数 - 使用权重衰减
-    optimizer = AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-    criterion = nn.BCELoss()
-
-    # 数据提取函数
-    def extract_fn(batch, device):
-        num_features = batch['num_features'].to(device)
-        labels = batch['label'].to(device).unsqueeze(1)
-        return (num_features,), labels
-
-    return {
-        'name': 'num',
-        'model': model,
-        'train_loader': train_loader,
-        'val_loader': val_loader,
-        'test_loader': test_loader,
-        'optimizer': optimizer,
-        'criterion': criterion,
-        'device': device,
-        'checkpoint_dir': checkpoint_dir,
-        'extract_fn': extract_fn,
-        'max_grad_norm': max_grad_norm,
-        'early_stopping_patience': early_stopping_patience,
-        'batch_size': batch_size,
-        'learning_rate': learning_rate,
-        'dropout': dropout,
-        'input_dim': input_dim
-    }
-
-
-# ==================== 配置注册表 ====================
 
 EXPERT_CONFIGS = {
     'des': create_des_expert_config,
-    'post': create_post_expert_config,    # Post Expert (单 MLP 版本)
+    'post': create_post_expert_config,
+    'cat': create_cat_expert_config,
+    'num': create_num_expert_config,
     'graph': create_graph_expert_config,
-    'cat': create_cat_expert_config,      # 类别属性专家 (单 MLP 版本)
-    'num': create_num_expert_config,      # 数值属性专家 (单 MLP 版本)
 }
 
-# 获取专家配置
+
 def get_expert_config(expert_name, **kwargs):
-    """
-    Args:
-        expert_name: 专家名称 ('des', 'post', 'graph', 'cat', 'num')
-        **kwargs: 传递给配置函数的参数
-
-    Returns:
-        dict: 专家配置字典
-    """
     if expert_name not in EXPERT_CONFIGS:
-        raise ValueError(f"未知的专家名称: {expert_name}. 可用选项: {list(EXPERT_CONFIGS.keys())}")
-
-    config_fn = EXPERT_CONFIGS[expert_name]
-
-    # 过滤kwargs，只传递专家配置函数接受的参数
-    import inspect
-    sig = inspect.signature(config_fn)
-    valid_params = set(sig.parameters.keys())
-    filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-
-    return config_fn(**filtered_kwargs)
-
+        raise ValueError(f"未知专家: {expert_name}. 可用: {list(EXPERT_CONFIGS.keys())}")
+    return EXPERT_CONFIGS[expert_name](**kwargs)

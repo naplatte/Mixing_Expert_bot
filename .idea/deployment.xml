@@ -1,37 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="root@connect.nmb1.seetacloud.com:33415 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="root@connect.nmb1.seetacloud.com:39948 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnSourceInSync="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
-      <paths name="root@connect.bjb1.seetacloud.com:33584 password">
+      <paths name="lzj@172.21.13.178:3322 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
+            <mapping deploy="/home/lzj/cuih/Mixing_Expert_bot" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="root@connect.bjb2.seetacloud.com:48982 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:17124 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:19314 password">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:19314 password (2)">
+      <paths name="root@connect.nmb1.seetacloud.com:13842 password">
         <serverdata>
           <mappings>
             <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
@@ -45,98 +24,21 @@
           </mappings>
         </serverdata>
       </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:32672 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:32699 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
       <paths name="root@connect.nmb1.seetacloud.com:33415 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:33841 password">
-        <serverdata>
-          <mappings>
             <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:34933 password">
+      <paths name="root@connect.nmb1.seetacloud.com:39948 password">
         <serverdata>
           <mappings>
             <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:36259 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb1.seetacloud.com:43056 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/Mixing_Expert_bot" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
       <paths name="root@connect.nmb1.seetacloud.com:46641 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb2.seetacloud.com:13709 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb2.seetacloud.com:35798 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@region-41.seetacloud.com:54718 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/Mixing_Expert_Bot" local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@region-42.seetacloud.com:51814 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@region-42.seetacloud.com:51814 password (2)">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@region-9.autodl.pro:18846 password">
         <serverdata>
           <mappings>
             <mapping deploy="/root/Mixing_Expert_bot" local="$PROJECT_DIR$" />

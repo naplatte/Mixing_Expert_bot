@@ -1,570 +1,195 @@
+"""通用专家训练器"""
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-import json
-import os
-import sys
 from pathlib import Path
+import sys
 
-# 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.metrics import update_binary_counts, compute_binary_f1
 
-# 通用专家训练器 - 支持任意专家模型的训练/验证/测试
+
 class ExpertTrainer:
-    def __init__(self, expert_config):
-        """
-        Args:
-            expert_config: dict, 包含以下字段:
-                - name: str, 专家名称 (如 'des', 'tweets', 'graph')
-                - model: nn.Module, 专家模型
-                - train_loader: DataLoader
-                - val_loader: DataLoader
-                - test_loader: DataLoader
-                - optimizer: torch.optim
-                - criterion: loss function
-                - device: str
-                - checkpoint_dir: str
-                - extract_fn: function, 数据提取函数 (batch, device) -> (inputs, labels)
-        """
-        self.name = expert_config['name']
-        self.model = expert_config['model']
-        self.train_loader = expert_config['train_loader']
-        self.val_loader = expert_config['val_loader']
-        self.test_loader = expert_config['test_loader']
-        self.optimizer = expert_config['optimizer']
-        self.criterion = expert_config['criterion']
-        self.device = expert_config['device']
-        self.checkpoint_dir = Path(expert_config['checkpoint_dir'])
+    """通用专家训练器"""
+
+    def __init__(self, config):
+        self.name = config['name']
+        self.model = config['model']
+        self.train_loader = config['train_loader']
+        self.val_loader = config['val_loader']
+        self.test_loader = config['test_loader']
+        self.optimizer = config['optimizer']
+        self.criterion = config['criterion']
+        self.device = config['device']
+        self.checkpoint_dir = Path(config['checkpoint_dir'])
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 数据提取函数(不同专家数据格式不同)
-        self.extract_fn = expert_config.get('extract_fn', self._default_extract)
-        
-        # 梯度裁剪
-        self.max_grad_norm = expert_config.get('max_grad_norm', None)
-
-        # 早停机制
-        self.early_stopping_patience = expert_config.get('early_stopping_patience', None)
-        self.early_stopping_counter = 0
-        self.best_val_metric = float('inf')  # 用于早停的指标（验证loss）
-
+        self.extract_fn = config.get('extract_fn', self._default_extract)
+        self.max_grad_norm = config.get('max_grad_norm')
+        self.patience = config.get('early_stopping_patience')
+        self.patience_counter = 0
         self.best_val_loss = float('inf')
         self.history = {'train': [], 'val': [], 'test': {}}
-    
+
     def _default_extract(self, batch, device):
-        """默认数据提取函数"""
         inputs = batch['input_ids'].to(device), batch['attention_mask'].to(device)
         labels = batch['label'].to(device).unsqueeze(1)
         return inputs, labels
-    
-    def train_epoch(self, epoch):
-        """训练一个epoch"""
-        self.model.train()
-        total_loss = 0
-        correct = 0
-        total = 0
+
+    def _run_epoch(self, loader, mode='train', epoch=0):
+        """通用训练/验证/测试循环"""
+        is_train = (mode == 'train')
+        self.model.train() if is_train else self.model.eval()
+
+        total_loss, correct, total = 0, 0, 0
         counts = {'tp': 0, 'fp': 0, 'fn': 0}
-        
-        pbar = tqdm(self.train_loader, desc=f"[{self.name.upper()}] Epoch {epoch} [Train]")
-        for batch in pbar:
-            # 提取数据(适配不同专家)
-            # extract_fn可能返回2个值(旧版)或3个值(新版，带has_data标记)
-            result = self.extract_fn(batch, self.device)
-            if len(result) == 3:
-                inputs, labels, has_data = result
-            else:
-                inputs, labels = result
-                has_data = None
 
-            self.optimizer.zero_grad()
-            
-            # 前向传播
-            _, bot_prob = self.model(*inputs)
-            
-            # 计算损失
-            loss = self.criterion(bot_prob, labels)
-            loss.backward()
+        ctx = torch.enable_grad() if is_train else torch.no_grad()
+        with ctx:
+            desc = f"[{self.name.upper()}] Epoch {epoch} [{mode.capitalize()}]" if epoch else f"[{self.name.upper()}] {mode.capitalize()}"
+            pbar = tqdm(loader, desc=desc)
 
-            # 梯度裁剪（如果配置中提供）
-            if hasattr(self, 'max_grad_norm') and self.max_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            for batch in pbar:
+                result = self.extract_fn(batch, self.device)
+                inputs, labels = result[:2]
 
-            self.optimizer.step()
-            
-            # 统计指标
-            total_loss += loss.item()
-            predictions = (bot_prob > 0.5).float()
-            correct += (predictions == labels).sum().item()
-            total += labels.size(0)
-            
-            # 更新F1计数
-            update_binary_counts(predictions, labels, counts)
-            _, _, f1_running = compute_binary_f1(counts)
-            
-            # 更新进度条
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{correct/total:.4f}',
-                'f1': f'{f1_running:.4f}'
-            })
-        
-        # 计算最终指标
-        avg_loss = total_loss / len(self.train_loader)
+                if is_train:
+                    self.optimizer.zero_grad()
+
+                _, bot_prob = self.model(*inputs)
+                loss = self.criterion(bot_prob, labels)
+
+                if is_train:
+                    loss.backward()
+                    if self.max_grad_norm:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
+
+                total_loss += loss.item()
+                preds = (bot_prob > 0.5).float()
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+                update_binary_counts(preds, labels, counts)
+
+                _, _, f1_run = compute_binary_f1(counts)
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{correct/total:.4f}', 'f1': f'{f1_run:.4f}'})
+
+        avg_loss = total_loss / len(loader)
         acc = correct / total
         precision, recall, f1 = compute_binary_f1(counts)
-        
-        return {
-            'loss': avg_loss,
-            'acc': acc,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
-        }
-    
+
+        return {'loss': avg_loss, 'acc': acc, 'precision': precision, 'recall': recall, 'f1': f1}
+
+    def train_epoch(self, epoch):
+        return self._run_epoch(self.train_loader, 'train', epoch)
+
     def validate(self, epoch):
-        """验证"""
-        self.model.eval()
-        total_loss = 0
-        correct = 0
-        total = 0
-        valid_total = 0  # 有效样本总数
-        counts = {'tp': 0, 'fp': 0, 'fn': 0}
-        
-        with torch.no_grad():
-            pbar = tqdm(self.val_loader, desc=f"[{self.name.upper()}] Epoch {epoch} [Val]")
-            for batch in pbar:
-                # extract_fn可能返回2个值或3个值
-                result = self.extract_fn(batch, self.device)
-                if len(result) == 3:
-                    inputs, labels, has_data = result
-                else:
-                    inputs, labels = result
-                    has_data = None
+        metrics = self._run_epoch(self.val_loader, 'val', epoch)
 
-                _, bot_prob = self.model(*inputs)
-                loss = self.criterion(bot_prob, labels)
-                
-                total_loss += loss.item()
-                predictions = (bot_prob > 0.5).float()
+        # Graph专家不在训练过程中保存最优模型，只保存最终模型
+        if self.name == 'graph':
+            return metrics
 
-                # 如果有has_data标记，只在有效样本上计算指标
-                if has_data is not None:
-                    valid_mask = has_data.bool().view(-1)
-                    valid_preds = predictions[valid_mask]
-                    valid_labels = labels[valid_mask]
+        if metrics['loss'] < self.best_val_loss:
+            self.best_val_loss = metrics['loss']
+            self._save_checkpoint('best', epoch, metrics)
+            print(f"  ✓ 保存最佳模型 (Val F1: {metrics['f1']:.4f})")
+            self.patience_counter = 0
+        elif self.patience:
+            self.patience_counter += 1
+            print(f"  早停计数: {self.patience_counter}/{self.patience}")
 
-                    correct += (valid_preds == valid_labels).sum().item()
-                    valid_total += valid_labels.size(0)
-                    total += labels.size(0)
+        return metrics
 
-                    if valid_labels.size(0) > 0:
-                        update_binary_counts(valid_preds, valid_labels, counts)
-                else:
-                    correct += (predictions == labels).sum().item()
-                    total += labels.size(0)
-                    valid_total += labels.size(0)
-                    update_binary_counts(predictions, labels, counts)
-
-                _, _, f1_running = compute_binary_f1(counts)
-                
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{correct/total:.4f}',
-                    'f1': f'{f1_running:.4f}'
-                })
-        
-        # 计算最终指标
-        avg_loss = total_loss / len(self.val_loader)
-        acc = correct / valid_total if valid_total > 0 else 0
-        precision, recall, f1 = compute_binary_f1(counts)
-        
-        # 如果过滤了无效样本，显示统计信息
-        if valid_total < total:
-            print(f"  [验证集] 总样本: {total}, 有效样本: {valid_total} (过滤 {total - valid_total} 个无效样本)")
-
-        # 保存最佳模型和早停逻辑
-        should_stop = False
-        if avg_loss < self.best_val_loss:
-            self.best_val_loss = avg_loss
-            self.save_checkpoint('best', epoch, {'val_loss': avg_loss, 'val_acc': acc, 'val_f1': f1})
-            print(f"  ✓ 保存最佳模型 (Val Loss: {avg_loss:.4f}, Val F1: {f1:.4f})")
-
-            # 重置早停计数器
-            if self.early_stopping_patience is not None:
-                self.early_stopping_counter = 0
-                self.best_val_metric = avg_loss
-        else:
-            # 验证loss没有改善
-            if self.early_stopping_patience is not None:
-                self.early_stopping_counter += 1
-                print(f"  ⚠ 验证Loss未改善 ({self.early_stopping_counter}/{self.early_stopping_patience})")
-
-                if self.early_stopping_counter >= self.early_stopping_patience:
-                    print(f"  ⏹ 触发早停机制！已连续{self.early_stopping_patience}轮未改善")
-                    should_stop = True
-
-        return {
-            'loss': avg_loss,
-            'acc': acc,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'should_stop': should_stop
-        }
-    
     def test(self):
-        """测试"""
-        print(f"\n[{self.name.upper()}] 开始测试...")
-        
-        # 加载最佳模型
-        self.load_checkpoint('best')
-        self.model.eval()
-        
-        total_loss = 0
-        correct = 0
-        total = 0
-        valid_total = 0  # 有效样本总数
-        counts = {'tp': 0, 'fp': 0, 'fn': 0}
-        
-        with torch.no_grad():
-            for batch in tqdm(self.test_loader, desc=f"[{self.name.upper()}] Testing"):
-                # extract_fn可能返回2个值或3个值
-                result = self.extract_fn(batch, self.device)
-                if len(result) == 3:
-                    inputs, labels, has_data = result
-                else:
-                    inputs, labels = result
-                    has_data = None
+        print(f"\n[{self.name.upper()}] 测试...")
+        # Graph专家不加载best模型，直接使用最后一轮的模型
+        if self.name != 'graph':
+            self._load_checkpoint('best')
+        return self._run_epoch(self.test_loader, 'test')
 
-                _, bot_prob = self.model(*inputs)
-                loss = self.criterion(bot_prob, labels)
-                
-                total_loss += loss.item()
-                predictions = (bot_prob > 0.5).float()
+    def train(self, num_epochs, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding'):
+        """完整训练流程"""
+        print(f"\n{'='*60}\n开始训练 {self.name.upper()} Expert\n{'='*60}")
 
-                # 如果有has_data标记，只在有效样本上计算指标
-                if has_data is not None:
-                    valid_mask = has_data.bool().view(-1)
-                    valid_preds = predictions[valid_mask]
-                    valid_labels = labels[valid_mask]
-
-                    correct += (valid_preds == valid_labels).sum().item()
-                    valid_total += valid_labels.size(0)
-                    total += labels.size(0)
-
-                    if valid_labels.size(0) > 0:
-                        update_binary_counts(valid_preds, valid_labels, counts)
-                else:
-                    correct += (predictions == labels).sum().item()
-                    total += labels.size(0)
-                    valid_total += labels.size(0)
-                    update_binary_counts(predictions, labels, counts)
-
-        # 计算最终指标
-        avg_loss = total_loss / len(self.test_loader)
-        acc = correct / valid_total if valid_total > 0 else 0
-        precision, recall, f1 = compute_binary_f1(counts)
-        
-        # 如果过滤了无效样本，显示统计信息
-        if valid_total < total:
-            print(f"  [测试集] 总样本: {total}, 有效样本: {valid_total} (过滤 {total - valid_total} 个无效样本)")
-
-        return {
-            'loss': avg_loss,
-            'acc': acc,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
-        }
-    
-    def extract_and_save_embeddings(self, save_dir='../../autodl-fs/labeled_embedding', force=False):
-        """
-        提取并保存所有数据集的特征嵌入
-
-        Args:
-            save_dir: 保存目录，默认为 '../../autodl-fs/labeled_embedding'
-            force: 是否强制重新提取并保存，即使文件已存在（默认 False）
-        """
-        save_path = Path(save_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
-
-        save_file = save_path / f'{self.name}_embeddings.pt'
-
-        # 检查文件是否已存在
-        if save_file.exists() and not force:
-            print(f"\n[{self.name.upper()}] ✓ 特征嵌入文件已存在，跳过提取")
-            print(f"  文件路径: {save_file}")
-            print(f"  如需重新提取，请设置 force=True 或手动删除该文件")
-            # 加载并返回已有的嵌入
-            all_embeddings = torch.load(save_file, map_location='cpu')
-            return all_embeddings
-
-        print(f"\n[{self.name.upper()}] 提取并保存特征嵌入...")
-
-        # 加载最佳模型
-        self.load_checkpoint('best')
-        self.model.eval()
-
-        all_embeddings = {}
-
-        # 对每个数据集提取特征
-        for split_name, loader in [('train', self.train_loader),
-                                     ('val', self.val_loader),
-                                     ('test', self.test_loader)]:
-            embeddings_list = []
-            probs_list = []  # 保存预测概率
-            labels_list = []
-
-            with torch.no_grad():
-                for batch in tqdm(loader, desc=f"[{self.name.upper()}] 提取 {split_name} 特征"):
-                    # 提取数据
-                    result = self.extract_fn(batch, self.device)
-                    if len(result) == 3:
-                        inputs, labels, has_data = result
-                    else:
-                        inputs, labels = result
-                        has_data = None
-
-                    # 获取特征嵌入（64维专家表示）和预测概率
-                    expert_repr, bot_prob = self.model(*inputs)
-
-                    embeddings_list.append(expert_repr.cpu())
-                    probs_list.append(bot_prob.cpu())  # 保存预测概率
-                    labels_list.append(labels.cpu())
-
-            # 合并所有批次
-            all_embeddings[split_name] = {
-                'embeddings': torch.cat(embeddings_list, dim=0),  # [N, 64]
-                'probs': torch.cat(probs_list, dim=0),  # [N, 1] - 预测概率
-                'labels': torch.cat(labels_list, dim=0)  # [N, 1]
-            }
-
-            print(f"  {split_name} 特征形状: {all_embeddings[split_name]['embeddings'].shape}, 概率形状: {all_embeddings[split_name]['probs'].shape}")
-
-        # 保存到文件
-        torch.save(all_embeddings, save_file)
-        print(f"  ✓ 特征嵌入已保存到: {save_file}")
-
-        return all_embeddings
-
-    def extract_and_save_embeddings_with_mask(self, save_dir='../../autodl-fs/labeled_embedding', 
-                                               raw_data_list=None, split_indices=None, force=False):
-        """
-        提取并保存特征嵌入（带 mask，用于 des/post 专家）
-        
-        与 extract_and_save_embeddings 不同，此方法：
-        1. 对所有样本（包括空数据样本）生成 embedding
-        2. 空数据样本用零向量填充，mask=False
-        3. 有效样本正常提取，mask=True
-        
-        Args:
-            save_dir: 保存目录
-            raw_data_list: 原始数据列表（未过滤的完整数据）
-            split_indices: dict, {'train': [...], 'val': [...], 'test': [...]} 各split的索引
-            force: 是否强制重新提取
-        
-        Returns:
-            all_embeddings: dict, 包含 embeddings, probs, labels, mask
-        """
-        save_path = Path(save_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
-        
-        save_file = save_path / f'{self.name}_embeddings.pt'
-        
-        # 检查文件是否已存在
-        if save_file.exists() and not force:
-            print(f"\n[{self.name.upper()}] ✓ 特征嵌入文件已存在，跳过提取")
-            print(f"  文件路径: {save_file}")
-            all_embeddings = torch.load(save_file, map_location='cpu')
-            return all_embeddings
-        
-        if raw_data_list is None or split_indices is None:
-            print(f"\n[{self.name.upper()}] 错误: 需要提供 raw_data_list 和 split_indices")
-            print(f"  请使用 extract_and_save_embeddings 方法或提供完整参数")
-            return None
-        
-        print(f"\n[{self.name.upper()}] 提取并保存特征嵌入（带 mask）...")
-        
-        # 加载最佳模型
-        self.load_checkpoint('best')
-        self.model.eval()
-        
-        all_embeddings = {}
-        expert_dim = 64  # 专家表示维度
-        
-        # 判断数据有效性的函数（根据专家类型）
-        def is_valid_data(data_item):
-            if self.name == 'des':
-                # Description: 非空且不是 'None'
-                desc_str = str(data_item).strip()
-                return desc_str != '' and desc_str.lower() != 'none'
-            elif self.name == 'post':
-                # Post/Tweets: 列表非空且有有效推文
-                if isinstance(data_item, list) and len(data_item) > 0:
-                    cleaned = [str(t).strip() for t in data_item 
-                              if str(t).strip() != '' and str(t).strip().lower() != 'none']
-                    return len(cleaned) > 0
-                return False
-            else:
-                return True  # 其他专家默认有效
-        
-        # 对每个 split 处理
-        for split_name, indices in split_indices.items():
-            num_samples = len(indices)
-            embeddings = torch.zeros(num_samples, expert_dim)
-            probs = torch.zeros(num_samples, 1)
-            mask = torch.zeros(num_samples, dtype=torch.bool)
-            labels = torch.zeros(num_samples, 1)
-            
-            # 收集有效样本的索引和数据
-            valid_batch_data = []
-            valid_positions = []
-            
-            for pos, idx in enumerate(indices):
-                data_item = raw_data_list[idx]
-                if is_valid_data(data_item):
-                    valid_batch_data.append((pos, data_item))
-                    valid_positions.append(pos)
-            
-            print(f"  [{split_name}] 有效样本: {len(valid_positions)}/{num_samples}")
-            
-            # 从对应的 loader 获取标签（按顺序）
-            loader = {'train': self.train_loader, 'val': self.val_loader, 'test': self.test_loader}[split_name]
-            
-            # 批量提取有效样本的特征
-            if len(valid_batch_data) > 0:
-                # 使用现有的 loader 提取（loader 已经过滤了无效样本）
-                batch_idx = 0
-                with torch.no_grad():
-                    for batch in tqdm(loader, desc=f"[{self.name.upper()}] 提取 {split_name} 特征"):
-                        result = self.extract_fn(batch, self.device)
-                        if len(result) == 3:
-                            inputs, batch_labels, _ = result
-                        else:
-                            inputs, batch_labels = result
-                        
-                        # 获取特征嵌入和预测概率
-                        expert_repr, bot_prob = self.model(*inputs)
-                        
-                        # 将结果放回对应位置
-                        batch_size = expert_repr.shape[0]
-                        for i in range(batch_size):
-                            if batch_idx < len(valid_positions):
-                                pos = valid_positions[batch_idx]
-                                embeddings[pos] = expert_repr[i].cpu()
-                                probs[pos] = bot_prob[i].cpu()
-                                mask[pos] = True
-                                labels[pos] = batch_labels[i].cpu()
-                                batch_idx += 1
-            
-            all_embeddings[split_name] = {
-                'embeddings': embeddings,  # [N, 64]
-                'probs': probs,            # [N, 1]
-                'mask': mask,              # [N] bool
-                'labels': labels           # [N, 1]
-            }
-            
-            print(f"    特征形状: {embeddings.shape}, mask 有效数: {mask.sum().item()}")
-        
-        # 保存到文件
-        torch.save(all_embeddings, save_file)
-        print(f"  ✓ 特征嵌入（带 mask）已保存到: {save_file}")
-        
-        return all_embeddings
-
-    def train(self, num_epochs, save_embeddings=True, embeddings_dir='../../autodl-fs/labeled_embedding', force_save_embeddings=False):
-        """
-        完整训练流程
-
-        Args:
-            num_epochs: 训练轮数
-            save_embeddings: 是否在训练完成后保存特征嵌入
-            embeddings_dir: 特征嵌入保存目录
-            force_save_embeddings: 是否强制重新提取并保存嵌入，即使文件已存在（默认 False）
-        """
-        print(f"\n{'='*60}")
-        print(f"开始训练 {self.name.upper()} Expert")
-        print(f"{'='*60}\n")
-        
         for epoch in range(1, num_epochs + 1):
-            train_metrics = self.train_epoch(epoch)
-            val_metrics = self.validate(epoch)
-            
-            self.history['train'].append(train_metrics)
-            self.history['val'].append(val_metrics)
-            
-            # 打印epoch结果
-            print(f"\nEpoch {epoch}/{num_epochs}:")
-            print(f"  Train - Loss: {train_metrics['loss']:.4f}, "
-                  f"Acc: {train_metrics['acc']:.4f}, F1: {train_metrics['f1']:.4f}")
-            print(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
-                  f"Acc: {val_metrics['acc']:.4f}, F1: {val_metrics['f1']:.4f}")
+            train_m = self.train_epoch(epoch)
+            val_m = self.validate(epoch)
 
-            # 检查早停
-            if val_metrics.get('should_stop', False):
-                print(f"\n⏹ 早停触发，在第 {epoch} 轮结束训练")
+            self.history['train'].append(train_m)
+            self.history['val'].append(val_m)
+
+            print(f"Epoch {epoch}: Train F1={train_m['f1']:.4f}, Val F1={val_m['f1']:.4f}")
+
+            if self.patience and self.patience_counter >= self.patience:
+                print(f"早停触发！")
                 break
 
-        # 测试
-        test_metrics = self.test()
-        self.history['test'] = test_metrics
-        
-        print(f"\n{'='*60}")
-        print(f"{self.name.upper()} Expert 测试结果:")
-        print(f"{'='*60}")
-        print(f"  Loss: {test_metrics['loss']:.4f}")
-        print(f"  Accuracy: {test_metrics['acc']:.4f}")
-        print(f"  Precision: {test_metrics['precision']:.4f}")
-        print(f"  Recall: {test_metrics['recall']:.4f}")
-        print(f"  F1 Score: {test_metrics['f1']:.4f}")
-        print(f"{'='*60}\n")
-        
-        # 保存最终模型（训练结束时的模型状态）
-        self.save_checkpoint('final', epoch, {
-            'test_loss': test_metrics['loss'],
-            'test_acc': test_metrics['acc'],
-            'test_f1': test_metrics['f1']
-        })
-        print(f"  ✓ 保存最终模型: {self.checkpoint_dir / f'{self.name}_expert_final.pt'}")
-        print(f"  ✓ 最优模型路径: {self.checkpoint_dir / f'{self.name}_expert_best.pt'}")
+        test_m = self.test()
+        self.history['test'] = test_m
 
-        # 如果是 MoE 模型（PostExpert, CatExpert, NumExpert 或 GraphExpert），打印专家使用统计
-        from src.model import PostExpert, CatExpert, NumExpert, GraphExpert
-        if isinstance(self.model, (PostExpert, CatExpert, NumExpert, GraphExpert)):
-            self.model.print_expert_usage_stats()
+        print(f"\n{'='*60}\n{self.name.upper()} 测试结果:\n{'='*60}")
+        print(f"  Acc: {test_m['acc']:.4f}, F1: {test_m['f1']:.4f}")
+        print(f"  Precision: {test_m['precision']:.4f}, Recall: {test_m['recall']:.4f}")
 
-        # 保存特征嵌入
+        self._save_checkpoint('final', num_epochs, test_m)
+
         if save_embeddings:
-            self.extract_and_save_embeddings(save_dir=embeddings_dir, force=force_save_embeddings)
+            self.extract_and_save_embeddings(embeddings_dir)
 
         return self.history
-    
-    def save_checkpoint(self, name, epoch=None, extra_info=None):
-        """保存检查点"""
+
+    def extract_and_save_embeddings(self, save_dir='../../autodl-fs/labeled_embedding', force=False):
+        """提取并保存embedding"""
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        save_file = save_path / f'{self.name}_embeddings.pt'
+
+        if save_file.exists() and not force:
+            print(f"[{self.name.upper()}] ✓ 嵌入文件已存在")
+            return torch.load(save_file, map_location='cpu')
+
+        print(f"\n[{self.name.upper()}] 提取embedding...")
+        self._load_checkpoint('best')
+        self.model.eval()
+
+        all_embeddings = {}
+        for split_name, loader in [('train', self.train_loader), ('val', self.val_loader), ('test', self.test_loader)]:
+            emb_list, prob_list, label_list = [], [], []
+
+            with torch.no_grad():
+                for batch in tqdm(loader, desc=f"[{self.name.upper()}] 提取 {split_name}"):
+                    result = self.extract_fn(batch, self.device)
+                    inputs, labels = result[:2]
+                    expert_repr, bot_prob = self.model(*inputs)
+
+                    emb_list.append(expert_repr.cpu())
+                    prob_list.append(bot_prob.cpu())
+                    label_list.append(labels.cpu())
+
+            all_embeddings[split_name] = {
+                'embeddings': torch.cat(emb_list, dim=0),
+                'probs': torch.cat(prob_list, dim=0),
+                'labels': torch.cat(label_list, dim=0)
+            }
+            print(f"  {split_name}: {all_embeddings[split_name]['embeddings'].shape}")
+
+        torch.save(all_embeddings, save_file)
+        print(f"  ✓ 保存到: {save_file}")
+        return all_embeddings
+
+    def _save_checkpoint(self, name, epoch, metrics):
         path = self.checkpoint_dir / f"{self.name}_expert_{name}.pt"
-        checkpoint = {
+        torch.save({
+            'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_loss': self.best_val_loss,
-        }
-        if epoch is not None:
-            checkpoint['epoch'] = epoch
-        if extra_info is not None:
-            checkpoint.update(extra_info)
-        
-        torch.save(checkpoint, path)
-    
-    def load_checkpoint(self, name):
-        """加载检查点"""
+            'metrics': metrics
+        }, path)
+
+    def _load_checkpoint(self, name):
         path = self.checkpoint_dir / f"{self.name}_expert_{name}.pt"
         if not path.exists():
-            print(f"警告: 检查点 {path} 不存在，使用当前模型状态")
+            print(f"警告: 检查点 {path} 不存在")
             return
-        
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
+        ckpt = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(ckpt['model_state_dict'])

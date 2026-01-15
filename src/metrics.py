@@ -1,18 +1,7 @@
 import torch
 
-
+# 计算'tp', 'fp', 'fn'
 def update_binary_counts(predictions: torch.Tensor, labels: torch.Tensor, counts: dict) -> dict:
-    """
-    累加二分类的 TP/FP/FN 计数。
-
-    Args:
-        predictions: 预测张量，取值为 {0,1}，形状 [N, 1] 或 [N]
-        labels: 真实标签张量，取值为 {0,1}，形状 [N, 1] 或 [N]
-        counts: 计数字典，包含键 'tp', 'fp', 'fn'
-
-    Returns:
-        更新后的 counts 字典
-    """
     pred_int = predictions.long().view(-1)
     true_int = labels.long().view(-1)
 
@@ -25,17 +14,8 @@ def update_binary_counts(predictions: torch.Tensor, labels: torch.Tensor, counts
     counts['fn'] = counts.get('fn', 0) + int(fn)
     return counts
 
-
+# 计算precision, recall, f1
 def compute_binary_f1(counts: dict):
-    """
-    基于 TP/FP/FN 计数计算二分类的 Precision/Recall/F1。
-
-    Args:
-        counts: 包含 'tp', 'fp', 'fn' 的字典
-
-    Returns:
-        (precision, recall, f1)
-    """
     tp = counts.get('tp', 0)
     fp = counts.get('fp', 0)
     fn = counts.get('fn', 0)
